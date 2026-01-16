@@ -21,21 +21,12 @@ Türkçe, Python tabanlı PDF dijital imzalama uygulaması. PKCS#11 uyumlu token
 
 ## ⚙️ Kurulum
 
-### 1. Python Sanal Ortamı
-```powershell
-# Sanal ortam oluştur
-python -m venv .venv
-
-# Aktifleştir
-.\.venv\Scripts\activate
-```
-
-### 2. Bağımlılıkları Yükle
+### 1. Bağımlılıkları Yükle
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Uygulamayı Çalıştır
+### 2. Uygulamayı Çalıştır
 ```powershell
 # GUI'yi başlat
 python gui.py
