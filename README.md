@@ -1,0 +1,188 @@
+﻿# PDF İmzacı - Profesyonel PDF İmza Uygulaması
+
+Türkçe, Python tabanlı PDF dijital imzalama uygulaması. PKCS#11 uyumlu tokenlar (USB e-imza, akıllı kartlar, HSM'ler) ile PAdES (ISO 32000-2) standartında imza atar.
+
+## 🚀 Özellikleri
+
+- ✨ **Modern ttkbootstrap GUI** - Profesyonel, kullanıcı dostu arayüz
+- 🔐 **PKCS#11 Token Yönetimi** - Otomatik keşif ve slot/sertifika seçimi  
+- 📁 **Dosya Seçimi** - Giriş/çıkış PDF dosyaları için dialog desteği
+- ✍️ **Görsel İmza Özelleştirmesi** - Boyut, konum, kenar boşluğu ayarları
+- 💾 **Kalıcı Ayarlar** - `~/.imzaci/config.json` dosyasında otomatik kaydedilir
+- 🔑 **Güvenli PIN Giriş** - Maskeli giriş, asla diske yazılmaz
+- 📊 **Gerçek-zamanlı Log** - İşlem geçmişi ve hata mesajları
+- 🛡️ **Hata Toleransı** - Fallback stratejileri ve anlaşılır hata mesajları
+
+## 📋 Gereksinimler
+
+- Python 3.8+
+- Windows (Linux/macOS için değişiklikler gerekebilir)
+- PKCS#11 uyumlu token ve sürücüleri
+
+## ⚙️ Kurulum
+
+### 1. Python Sanal Ortamı
+```powershell
+# Sanal ortam oluştur
+python -m venv .venv
+
+# Aktifleştir
+.\.venv\Scripts\activate
+```
+
+### 2. Bağımlılıkları Yükle
+```powershell
+pip install -r requirements.txt
+```
+
+### 3. Uygulamayı Çalıştır
+```powershell
+# GUI'yi başlat
+python gui.py
+
+# Veya
+python -m imzaci
+```
+
+## 🎯 Kullanım
+
+### GUI İle (Önerilen)
+
+1. **PKCS#11 DLL Seçin**
+   - "Gözat" butonuyla manuel seç
+   - Veya otomatik keşif (uygulama açılışında çalışır)
+   - Ayarlar `~/.imzaci/config.json` dosyasında kaydedilir
+
+2. **Token & Sertifika Seçin**
+   - Token combo'sundan token seçin
+   - Sertifika combo'sundan sertifika seçin
+   - "Yenile" butonuyla manual güncelle
+
+3. **Dosyaları Seçin**
+   - Giriş PDF'ini seçin
+   - Çıkış dosyası otomatik önerilir (değiştirebilirsiniz)
+
+4. **İmza Ayarlarını Yapılandırın**
+   - Logo genişliği (mm)
+   - Metin genişliği (mm)
+   - Pozisyon (sağ-üst, sol-üst, vs.)
+   - Kenar boşluğu (mm)
+
+5. **PIN Girin ve İmzala**
+   - PIN'i girin (maskeli giriş)
+   - "İmzala" butonuna basın
+   - Log penceresinde ilerlemeyi izleyin
+
+### CLI İle (Opsiyonel)
+
+```powershell
+# Tokenları listele
+python sign_pdf.py --pkcs11-lib "C:\Windows\System32\akisp11.dll" list-slots
+
+# Sertifikaları listele
+python sign_pdf.py --pkcs11-lib "C:\Windows\System32\akisp11.dll" list-certs
+
+# PDF imzala
+python sign_pdf.py sign \
+  --pkcs11-lib "C:\Windows\System32\akisp11.dll" \
+  --in input.pdf \
+  --out signed.pdf \
+  --pin 123456 \
+  --reason "Belge onayı" \
+  --location "İstanbul"
+```
+
+## 📁 Proje Yapısı
+
+```
+.
+├── gui.py                        ⭐ Ana GUI (ttkbootstrap)
+├── sign_pdf.py                   🔧 İmzalama motoru (backend)
+├── constants.py                  ⚙️  Sabit değerler & konfigürasyonlar
+├── __main__.py                   📍 Entry point
+├── requirements.txt              📦 Python bağımlılıkları
+└── README.md                     📚 Bu dosya
+```
+
+### Dosya Açıklamaları
+
+| Dosya | Amaç |
+|-------|------|
+| `gui.py` | Ana GUI uygulaması - kullanıcı arayüzü, event handling |
+| `sign_pdf.py` | PDF imzalama ve PKCS#11 yönetimi - saf backend |
+| `constants.py` | Merkezi sabit değerler - UI boyutları, varsayılan ayarlar |
+| `__main__.py` | PyInstaller ve modül çalıştırma desteği |
+
+## 🔒 Güvenlik Notları
+
+- 🔐 **PIN hiçbir zaman kaydedilmez** - Her imzalama işleminde girilir
+- 🔐 **Detached imza** - Orijinal PDF değiştirilmez
+- ✅ **Adobe/Acrobat uyumlu** - İmzalar standart reader'larda doğrulanır
+- ✅ **PAdES ISO 32000-2** - Uluslararası standart imza formatı
+
+## 🛠️ Konfigürasyon
+
+Ayarlar `~/.imzaci/config.json` dosyasında kaydedilir:
+
+```json
+{
+  "pkcs11_dll": "C:\\Windows\\System32\\akisp11.dll",
+  "signature": {
+    "width_mm": 30.0,
+    "logo_width_mm": 15.0,
+    "margin_x_mm": 12.0,
+    "margin_y_mm": 12.0,
+    "placement": "top-right"
+  }
+}
+```
+
+## 🐛 Sorun Giderme
+
+### PKCS#11 DLL Bulunamıyor
+```powershell
+# Sistem32'de PKCS#11 DLL'lerini ara
+Get-ChildItem C:\Windows\System32 -Filter *pkcs11* -o List
+Get-ChildItem C:\Windows\System32 -Filter akisp* -o List
+```
+
+### Token Algılanmıyor
+1. USB tokeni çıkar/takın
+2. Sürücüleri yeniden yükleyin
+3. GUI'de "Yenile" butonuna tıkla
+4. Windows Cihaz Yöneticisi'nde kontrol et
+
+### İmzalama Başarısız
+- Log penceresindeki hata mesajını oku
+- PIN'i doğrula
+- PDF dosyasını kontrol et
+- Token'ı yeniden tak
+
+## 📦 Dağıtım
+
+### PyInstaller ile EXE Oluştur
+```powershell
+pip install pyinstaller
+pyinstaller imzaci.spec
+```
+
+Çıktı: `dist/imzaci.exe` (bağımsız çalışabilir)
+
+## 📚 Teknoloji Stack
+
+| Bileşen | Amaç |
+|---------|------|
+| [pyHanko](https://github.com/MatthiasValvekens/pyHanko) | PDF imzalama (PAdES) |
+| [python-pkcs11](https://github.com/openegos/python-pkcs11) | PKCS#11 token API |
+| [ttkbootstrap](https://ttkbootstrap.readthedocs.io/) | Modern GUI framework |
+| [pikepdf](https://pikepdf.readthedocs.io/) | PDF işlemleri |
+| [cryptography](https://cryptography.io/) | Kriptografi işlemleri |
+
+## 📝 Lisans
+
+Bu proje açık kaynaklı olup eğitim ve ticari amaçla kullanılabilir.
+
+---
+
+**Son Güncelleme:** Ocak 2026  
+**Versiyon:** 2.3

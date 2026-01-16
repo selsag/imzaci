@@ -1,0 +1,31 @@
+﻿.env
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.imzaci/
+
+# Test ve geçici dosyalar
+in.pdf
+in_signed.pdf
+in_signed_fixed.pdf
+pre_generate.py
+*.log
+
+# Gereksiz dosyalar
+sablon.png
+logo_imza - Kopya.png
+
+# Build çıktıları
+fonts/
+hooks/
+pycparser/
+
+# Yedek dosyalar
+yedek/
+
+# Test scriptleri
+scripts/
