@@ -2,7 +2,13 @@
 
 Türkçe, Python tabanlı PDF dijital imzalama uygulaması. PKCS#11 uyumlu tokenlar (USB e-imza, akıllı kartlar, HSM'ler) ile PAdES (ISO 32000-2) standartında imza atar.
 
-## 🚀 Özellikleri
+## � Hızlı Başlangıç
+
+**Windows Kullanıcıları:** [Latest Release](https://github.com/selsag/imzaci/releases) kısmından `imzaci.exe` indir ve çalıştır! 🎯
+
+Veya aşağıda Python ile kurulum yap.
+
+## �🚀 Özellikleri
 
 - ✨ **Modern ttkbootstrap GUI** - Profesyonel, kullanıcı dostu arayüz
 - 🔐 **PKCS#11 Token Yönetimi** - Otomatik keşif ve slot/sertifika seçimi  
