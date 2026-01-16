@@ -5,7 +5,8 @@ Türkçe, Python tabanlı PDF dijital imzalama uygulaması. PKCS#11 uyumlu token
 ## � Hızlı Başlangıç
 
 **Windows Kullanıcıları:** [Latest Release](https://github.com/selsag/imzaci/releases) kısmından `imzaci.exe` indir ve çalıştır! 🎯
-
+> ⚠️ **Windows Uyarısı:** İlk çalıştırmada "Bilinmeyen yayıncı" uyarısı görebilirsiniz.
+> "Daha Fazla Bilgi" → "Yine de Çalıştır" tıklayınız. Bu normal ve güvenlidir.
 Veya aşağıda Python ile kurulum yap.
 
 ## �🚀 Özellikleri
