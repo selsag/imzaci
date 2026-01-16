@@ -27,5 +27,8 @@ pycparser/
 # Yedek dosyalar
 yedek/
 
+# Toplu imzalama çıktıları
+imzalananlar/
+
 # Test scriptleri
 scripts/

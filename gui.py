@@ -2713,7 +2713,7 @@ Devam etmek istiyor musunuz?"""
                 self._help_win.focus()
                 return
             
-            guide_path = Path(__file__).parent / "KULLANIMA_KILAVUZU.md"
+            guide_path = Path(__file__).parent / "KULLANMA_KILAVUZU.md"
             
             if not guide_path.exists():
                 messagebox.showerror(
