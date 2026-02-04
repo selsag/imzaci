@@ -79,20 +79,21 @@ TEMP_DIR = Path(tempfile.gettempdir()) / 'imzaci'
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 def cleanup_temp_cache():
-    """Clean up old temporary files (older than 24 hours) to prevent stale file references."""
+    """Clean up ALL temporary files on startup to prevent stale cache issues.
+    
+    This solves issues where old temp files (especially signature images and
+    cached PDFs with incorrect DPI/coordinates) cause misalignment on different
+    computers.
+    """
     try:
-        import time
-        now = time.time()
-        max_age = 24 * 60 * 60  # 24 hours
         if TEMP_DIR.exists():
+            import shutil
             for item in TEMP_DIR.iterdir():
                 try:
-                    if item.stat().st_mtime < now - max_age:
-                        if item.is_file():
-                            item.unlink()
-                        elif item.is_dir():
-                            import shutil
-                            shutil.rmtree(item, ignore_errors=True)
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
                 except Exception:
                     pass
     except Exception:
@@ -124,7 +125,10 @@ def create_combined_signature_image(logo_imza_path, signer_lines, font_size_mm, 
         logo_img = PILImage.open(str(logo_imza_path)).convert('RGBA')
 
         # Constant DPI for consistent text scaling relative to mm
-        DPI = 300 if not preview_mode else 120
+        # FIX: Use consistent DPI for both preview and final PDF to avoid coordinate mismatch
+        # across different computers. The image will be scaled differently when embedded,
+        # but the mm-based dimensions remain consistent.
+        DPI = 300  # Use 300 DPI consistently for all modes
         px_per_mm = DPI / 25.4
         
         # Calculate pixel widths for components based on absolute mm

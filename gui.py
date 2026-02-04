@@ -164,14 +164,18 @@ class ModernTTKApp:
     
     def __init__(self):
         """Initialize the application and set up the UI."""
-        # Clean up old temporary files before starting
+        # Clean up ALL temporary files before starting (fixes stale DPI/coordinate issues)
         cleanup_temp_cache()
         
-        # Initialize image cache variables
+        # Initialize image cache variables (clear any stale caches)
         self._sig_image_cache = None
         self._sig_image_cache_key = None
         self._bg_image_cache = None
         self._bg_image_cache_key = None
+        self._embedded_bg_photo = None
+        self._preview_bg_photo = None
+        self._embedded_sig_photo = None
+        self._preview_sig_photo = None
 
         # Create root window with ttkbootstrap theme
         self.root = ttk.Window(themename=WINDOW_THEME)
@@ -1205,8 +1209,9 @@ class ModernTTKApp:
             doc = fitz.open(pdf_path)
             if len(doc) > 0:
                 page = doc[0]
-                # 150 DPI hız ve kalite için ideal bir dengedir
-                pix = page.get_pixmap(dpi=150)
+                # Use 300 DPI consistently with signature image generation to avoid
+                # coordinate mismatches on different computers (FIX for signature positioning)
+                pix = page.get_pixmap(dpi=300)
                 temp_sablon = TEMP_DIR / 'dynamic_sablon.png'
                 pix.save(str(temp_sablon))
                 self.log_message(f"📄 PDF önizleme şablonu oluşturuldu: {Path(pdf_path).name}")
