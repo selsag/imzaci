@@ -10,8 +10,10 @@ Profesyonel PDF İmzalama Uygulaması için adım adım kılavuz.
 2. [Arayüz Tanıtımı](#arayüz-tanıtımı)
 3. [Adım Adım Kullanım](#adım-adım-kullanım)
 4. [İmza Ayarları](#imza-ayarları)
-5. [Sık Sorulan Sorular](#sık-sorulan-sorular)
-6. [Sorun Giderme](#sorun-giderme)
+5. [Gelişmiş Özellikler](#gelişmiş-özellikler)
+6. [Toplu İmzalama](#toplu-imzalama)
+7. [Sık Sorulan Sorular](#sık-sorulan-sorular)
+8. [Sorun Giderme](#sorun-giderme)
 
 ---
 
@@ -160,14 +162,142 @@ Dilerseniz ana ekrandaki Şablon alanını, dilerseniz de Önzile butonu ile dah
 
 **İşlem sırasında:**
 - ⏳ 3-10 saniye bekle (PDF boyutuna bağlı)
+
 ---
 
+## 🛡️ Gelişmiş Özellikler
 
-## ❓ Sık Sorulan Sorular
+### Çoklu İmzalama (Multi-Signature)
 
-### S: Ayarlarımı her açılışta ayarlamak istemiyorum?
-**C:** Tüm ayarlar otomatik kaydedilir:
-- Bir sonraki açılışta aynı ayarlar yüklenir
+**Ne işe yarar?**
+Birden fazla kişinin aynı PDF'yi ardı ardına imzalamasını sağlar.
+
+**Kullanım adımları:**
+1. "Çoklu İmza" checkbox'ını işaretleyin
+2. İlk kişi PDF'yi imzalasın → `belgem_signed.pdf` oluşur
+3. İkinci kişi bu imzalı PDF'yi giriş dosyası olarak seç
+4. Tekrar "Çoklu İmza" işaretlenmiş halde "İmzala" tıkla
+5. İkinci imza eklenir → `belgem_signed_2.pdf` oluşur
+
+**Örnek senaryo:**
+```
+Talep Eden: Ali (Email: ali@sirket.com)
+    ↓ İmzala (İmza 1)
+Onaylayan: Veli (Email: veli@sirket.com)  
+    ↓ İmzala (İmza 2)
+Genel Müdür: Mehmet (Email: meli@sirket.com)
+    ↓ İmzala (İmza 3)
+Final PDF: belgem_signed_3.pdf (3 imza ile)
+```
+
+**İpucu:** Her imzalama sonrası yeni dosya oluşturulur, orijinal korunur.
+
+---
+
+### Zaman Damgası (TSA - Time Stamp Authority)
+
+**Ne işe yarar?**
+PDF'nin hangi tarih/saatte imzalandığını resmi olarak kayıt altına alır.
+
+**Otomatik Etkinleştirme:**
+- Test ağı kullanılıyorsa: Otomatik açılır
+- Manuel açma:
+  1. "TSA" checkbox'ını işaretleyin
+  2. Default: `http://timestamp.digicert.com` (DigiCert sunucusu)
+  3. İmzalayın
+
+**Avantajları:**
+- İmza zamanını kanıtla
+- Hukuki belge için tarih damgası
+- İmzanın süresi dolsa bile zaman kaydı kalır
+
+---
+
+### Süresi Uzatma (LTV - Long-Term Validity)
+
+**Ne işe yarar?**
+İmzanın yıllar sonrasında da doğrulanabilmesini sağlar.
+
+**Kullanım:**
+1. "LTV" checkbox'ını işaretleyin
+2. Sertifika chain'i (zincir) PDF'e gömülür
+3. İmzalayın
+
+**Neden gerekli?**
+- İmza sertifikası süresi dolsa bile PDF geçerli olur
+- Arşivleme için uzun vadeli geçerlilik
+- Yasal belgeler için önerilir
+
+---
+
+### Belge Kısıtlamalar (DocMDP - Certification Permissions)
+
+**Ne işe yarar?**
+İmzalı PDF'ye sonradan yapılabilecek değişiklikleri kontrol eder.
+
+**3 Seçenek:**
+
+| Seçenek | İzin Verilen | Yasak |
+|---------|-------------|-------|
+| **Sadece İmza** | Yalnız imza ekleme | Form doldurma, düzenleme |
+| **Form Doldurma + İmza** | Form doldurma, imza ekleme | PDF içeriğini düzenleme |
+| **Form + Yorum + İmza** | Form, yorum, imza ekleme | PDF sayfalarını silme |
+
+**Örnek:**
+```
+Sözleşme: "Sadece İmza" → Hiç kimse muhteva değiştiremez
+Teklif: "Form doldurma + imza" → Fiyat alanı doldurulabilir
+Rapor: "Form + yorum + imza" → Notlar/açıklamalar eklenebilir
+```
+
+---
+
+### İmzalama Seçenekleri Yardımı
+
+Sağ üst köşedeki **ℹ️ (Mavi soru işareti)** butonuyla açılan modal pencereden tüm seçenekleri görebilirsiniz:
+- **LTV:** Sertifika zincirsin kaydı
+- **TSA:** Zaman damgası sunucusu ve durumu
+- **DocMDP:** Belge kısıtlamaları açıklaması
+- **Çoklu İmza:** Ardışık imzalama bilgisi
+
+---
+
+## 📚 Toplu Belge İmzalama
+
+**Birden fazla PDF'yi bir kez imzalamak için:**
+
+### 1. "Toplu Belge İmzalama" Butonuna Tıkla
+```
+[📚 Toplu Belge İmzalama]
+```
+
+### 2. Dosya Seç Dialogu Açılır
+- **Giriş Klasörü:** İmzalanacak PDF'lerin bulunduğu klasörü seç
+- **Çıkış Klasörü:** İmzalı dosyaların kaydedileceği yeri seç (varsayılan: Giriş Klasörü)
+
+### 3. Otomatik İmzalama Başlar
+```
+⏳ belgem1.pdf imzalanıyor...
+✅ belgem1_signed.pdf tamam
+
+⏳ belgem2.pdf imzalanıyor...
+✅ belgem2_signed.pdf tamam
+
+⏳ belgem3.pdf imzalanıyor...
+✅ belgem3_signed.pdf tamam
+
+Hepsi Bitti! 3 dosya imzalandı.
+```
+
+**Avantajları:**
+- 100+ dosyayı otomatik imzala
+- Hepsi aynı ayarlarla (PIN, sertifika, imza konumu)
+- Hata varsa devam et, istisna dosyaları raporla
+- Zaman tasarrufu
+
+**İpucu:** İmza konumunu önceden ön izlemede ayarla, toplu imzalama hepsine uygulayacak.
+
+---
 
 ### S: Birden fazla token var, onu seçebilir miyim?
 **C:** Evet! Token combo'sundan istediğinizi seçebilirsiniz. 
@@ -198,6 +328,41 @@ PIN'i düzelt ve yeniden dene.
 
 ### S: Bir PDF'yi birden fazla kez imzalayabilir miyim?
 **C:** Evet! İmzalı PDF'yi yeniden giriş dosyası olarak seçebilirsin.
+
+### S: Çoklu imzalamada sırası önemli mi?
+**C:** Evet! Yasal ve kronolojik sırayla yapılması tavsiye edilir:
+1. Talebi yapan kişi
+2. Onaylayan/Müdür
+3. Genel Müdür/Yönetim
+
+### S: TSA sunucusu offline olursa ne olur?
+**C:** İmza başarısız olur. Uygulama otomatik interneti kontrol eder:
+- Offline ise "TSA" checkbox'ı gri olur
+- Online bağlandıktan sonra açılabilir
+
+### S: LTV ve TSA farklı mı?
+**C:** Evet!
+- **TSA:** İmza anının zaman kaydı
+- **LTV:** Sertifika zincirinin saklanması
+- **İkisi beraber:** En güvenli (önerilir)
+
+### S: PDF zaten imzalı ise "Çoklu İmza" olmadan imzalayırsam?
+**C:** 
+- "Çoklu İmza" açık: 2. imza eklenir ✅
+- "Çoklu İmza" kapalı: Hata → "PDF zaten imzalı" uyarısı
+
+### S: Toplu imzalamada hata olursa tüm işlem durmam mı?
+**C:** Hayır! Hatalı dosya atlanır, diğerleri devam eder:
+```
+⏳ belgem1.pdf imzalanıyor...
+✅ belgem1_signed.pdf tamam
+
+❌ belgem2.pdf → HATA: PIN yanlış
+(Devam ediyor...)
+
+⏳ belgem3.pdf imzalanıyor...
+✅ belgem3_signed.pdf tamam
+```
 
 ---
 
@@ -295,8 +460,8 @@ Süresi dolmuşsa yeni sertifika talep et.
 
 ---
 
-**Versiyon:** 2.3  
-**Son Güncelleme:** Ocak 2026  
+**Versiyon:** 2.4  
+**Son Güncelleme:** Şubat 2026  
 **Yazarlar:** Selim SAĞOL - Öğr. Görevlisi/Uzman/Bilgisayar Mühendisi  
 
 Keyifli imzalamalar! 🎉

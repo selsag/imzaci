@@ -23,6 +23,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, Toplevel, Label, Text
 import threading
 import os
+import webbrowser
 import math
 try:
     from PIL import Image as PILImage, ImageTk
@@ -152,6 +153,58 @@ class BootstrapIcon:
             # Keep reference to prevent garbage collection
             self.widget.image = img
 
+class CreateToolTip:
+    """Create a tooltip for a given widget that recalculates position on show (multi-screen safe)."""
+    def __init__(self, widget, text, root_window=None):
+        self.widget = widget
+        self.text = text
+        self.root = root_window or widget.winfo_toplevel()  # Use provided root or find it
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        # Bind events directly to show/hide tooltip
+        self.widget.bind("<Enter>", self.showtip, add="+")
+        self.widget.bind("<Leave>", self.hidetip, add="+")
+    
+    def showtip(self, event=None):
+        """Display tooltip below the widget with fresh position calculation."""
+        # Hide existing tooltip first to recalculate position
+        self.hidetip()
+        
+        if not self.text:
+            return
+        try:
+            # Get widget position and size (fresh calculation for multi-screen)
+            x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+            
+            # Create tooltip window - use main root for multi-screen support
+            self.tipwindow = tw = Toplevel(self.root)
+            tw.wm_overrideredirect(True)
+            tw.attributes('-topmost', True)  # Ensure tooltip stays on top
+            
+            # Create label with text - light orange background with white text
+            style = ttk.Style()
+            style.configure("Tooltip.TLabel", background="#FFA500", foreground="white", padding=(4, 2))
+            label = ttk.Label(tw, text=self.text, style="Tooltip.TLabel")
+            label.pack(ipadx=2, ipady=2)
+            
+            # Position tooltip - offset to center horizontally
+            tw.update_idletasks()
+            tw_width = tw.winfo_width()
+            tw.wm_geometry(f"+{max(0, x - tw_width // 2)}+{y}")
+        except Exception:
+            self.tipwindow = None
+    
+    def hidetip(self, event=None):
+        """Hide tooltip."""
+        if self.tipwindow:
+            try:
+                self.tipwindow.destroy()
+            except Exception:
+                pass
+            self.tipwindow = None
+
 class ModernTTKApp:
     """Main application class for the PDF signing GUI.
     
@@ -233,6 +286,10 @@ class ModernTTKApp:
         # Auto-run PKCS#11 scan once after the GUI is idle (avoid layout races)
         self._pkcs11_scanning = False
         self.root.after_idle(self.browse_pkcs11_auto)
+        # Check internet for LTV and TSA
+        threading.Thread(target=self._auto_enable_ltv_if_online, daemon=True).start()
+        threading.Thread(target=self._auto_enable_tsa_if_online, daemon=True).start()
+        
         # İlk önizleme çizimini tetikle
         self.root.after(1000, lambda: self._show_signature_preview(silent=True))
         # Debounce handle for preview auto-refresh (ms timer id)
@@ -241,6 +298,40 @@ class ModernTTKApp:
         self._save_sig_after_id = None
         # Tooltip for canvas
         self.canvas_tooltip = None
+
+    def _check_internet_connection(self):
+        """Basit bir DNS sorgusu ile internet bağlantısını kontrol eder."""
+        try:
+            import socket
+            # Google DNS (8.8.8.8) port 53 (DNS) control
+            # Connection timeout 2 seconds
+            sock = socket.create_connection(("8.8.8.8", 53), timeout=2)
+            sock.close()
+            return True
+        except OSError:
+            return False
+
+    def _auto_enable_ltv_if_online(self):
+        """İnternet varsa LTV'yi otomatik açar, yoksa kapatır."""
+        if self._check_internet_connection():
+            # Internet available -> Enable LTV
+            self.root.after(0, lambda: self.ltv_var.set(True))
+            self.root.after(0, lambda: self.log_message("🌐 İnternet algılandı: LTV otomatik açıldı."))
+        else:
+            # No internet -> Disable LTV to avoid timeouts
+            self.root.after(0, lambda: self.ltv_var.set(False))
+            self.root.after(0, lambda: self.log_message("⚠️ İnternet yok: LTV kapatıldı."))
+
+    def _auto_enable_tsa_if_online(self):
+        """İnternet varsa TSA'yı otomatik açar, yoksa kapatır."""
+        if self._check_internet_connection():
+            # Internet available -> Enable TSA
+            self.root.after(0, lambda: self.tsa_enabled_var.set(True))
+            self.root.after(0, lambda: self.log_message("🌐 İnternet algılandı: TSA otomatik açıldı."))
+        else:
+            # No internet -> Disable TSA to avoid timeouts
+            self.root.after(0, lambda: self.tsa_enabled_var.set(False))
+            self.root.after(0, lambda: self.log_message("⚠️ İnternet yok: TSA kapatıldı."))
 
     def build_ui(self):
         # Main container - use GRID for entire layout (no pack/grid mix)
@@ -460,7 +551,7 @@ class ModernTTKApp:
             image=self.refresh_icon.image,
             bootstyle="warning-outline",
             padding=0,
-            command=lambda: threading.Thread(target=self._update_tokens_from_pkcs11_lib, daemon=True).start()
+            command=lambda: threading.Thread(target=self._update_tokens_internal, daemon=True).start()
         )
         self.refresh_icon.attach(_btn_token_refresh)
         _btn_token_refresh.grid(row=0, column=2, sticky=W, padx=2, pady=2)
@@ -472,15 +563,89 @@ class ModernTTKApp:
         self.cert_combo.grid(row=1, column=1, sticky=EW, padx=2, pady=2)
         self.cert_combo.bind('<<ComboboxSelected>>', lambda e: self._update_signature_image_display())
         self.detail_icon = BootstrapIcon("zoom-in", "🔍", ({"color": "warning"}, {"color": "white"}))
-        _btn_cert_detail = ttk.Button(token_frame, text='', image=self.detail_icon.image, bootstyle='warning-outline', padding=0, command=lambda: threading.Thread(target=self.show_cert_details, daemon=True).start())
+        _btn_cert_detail = ttk.Button(
+            token_frame,
+            text="",
+            image=self.detail_icon.image,
+            bootstyle="warning-outline",
+            padding=0,
+            command=self._show_cert_details
+        )
         self.detail_icon.attach(_btn_cert_detail)
         _btn_cert_detail.grid(row=1, column=2, sticky=W, padx=2, pady=2)
+        
+        # Help icon for signing help modal (icon: info color on normal, danger on hover)
+        self.help_icon = BootstrapIcon("question-circle", "?", ({"color": "info"}, {"color": "danger"}))
         
         # --- RIGHT COLUMN (Signing) ---
         sign_tab = ttk.Labelframe(right_col, text="✍️ İmzalama", padding=15, bootstyle="primary")
         sign_tab.pack(fill=X, pady=5)
         # store as attribute so type-checkers and nested functions can access it reliably
         self.sign_tab = sign_tab
+
+        # Options Frame (LTV, TSA, Compress PDF, DocMDP)
+        options_frame = ttk.Frame(self.sign_tab)
+        options_frame.grid(row=6, column=0, columnspan=3, sticky=EW, pady=5, padx=5)
+        
+        import tkinter as tk # Ensure tk is imported for BooleanVar
+        signing_conf = self.config.get('signing', {}) if getattr(self, 'config', None) else {}
+        self.default_tsa_url = "http://timestamp.digicert.com"
+        
+        # LTV Checkbox
+        self.ltv_var = tk.BooleanVar(value=bool(signing_conf.get('ltv_enabled', False)))
+        self.ltv_check = ttk.Checkbutton(options_frame, text="LTV", variable=self.ltv_var, command=lambda: print("LTV toggled"))
+        self.ltv_check.pack(side="left", padx=5)
+        
+        # Compress PDF Checkbox
+        self.compress_pdf_var = tk.BooleanVar(value=False)
+        self.compress_check = ttk.Checkbutton(options_frame, text="PDF'i Sıkıştır", variable=self.compress_pdf_var, command=lambda: print("Compress PDF toggled"))
+        self.compress_check.pack(side="left", padx=5)
+
+        # TSA (Timestamp Authority) Toggle
+        self.tsa_enabled_var = tk.BooleanVar(value=bool(signing_conf.get('tsa_enabled', False)))
+        self.tsa_check = ttk.Checkbutton(options_frame, text="TSA", variable=self.tsa_enabled_var, command=lambda: self._save_signing_settings())
+        self.tsa_check.pack(side="left", padx=5)
+
+        # DocMDP (certification permissions)
+        ttk.Label(options_frame, text="MDP:").pack(side="left")
+        self._docmdp_map = {
+            "Sadece imza": "signing_only",
+            "Form doldurma + imza": "form_fill",
+            "Form + yorum + imza": "annotations",
+        }
+        docmdp_rev = {v: k for k, v in self._docmdp_map.items()}
+        default_docmdp = docmdp_rev.get(signing_conf.get('docmdp_mode'), "Sadece imza")
+        self.docmdp_var = tk.StringVar(value=default_docmdp)
+        self.docmdp_combo = Combobox(options_frame, textvariable=self.docmdp_var, values=list(self._docmdp_map.keys()), state='readonly', width=18)
+        self.docmdp_combo.pack(side="left", padx=(4, 0))
+        self.docmdp_combo.bind('<<ComboboxSelected>>', lambda e: self._save_signing_settings())
+        
+        # Help button with icon (far right) - TTK solid light button
+        _btn_signing_help = ttk.Button(
+            options_frame,
+            text="",
+            image=self.help_icon.image,
+            bootstyle="light",
+            padding=0,
+            command=self._show_signing_help
+        )
+        _btn_signing_help.pack(side="left", padx=2)
+        self.help_icon.attach(_btn_signing_help)
+        CreateToolTip(_btn_signing_help, "İmzalama seçenekleri hakkında bilgi", self.root)
+        
+        # Persist signing options when changed
+        try:
+            self.ltv_var.trace_add('write', lambda *a: self._save_signing_settings())
+        except Exception:
+            pass
+        try:
+            self.tsa_enabled_var.trace_add('write', lambda *a: self._save_signing_settings())
+        except Exception:
+            pass
+        try:
+            self.docmdp_combo.bind('<<ComboboxSelected>>', lambda e: self._save_signing_settings())
+        except Exception:
+            pass
 
         # --- İmza Şablonu Paneli (Sağ Alt) ---
         sig_template_tab = ttk.Labelframe(right_col, text="🧾 İmza Şablonu", padding=0, bootstyle="primary")
@@ -547,11 +712,12 @@ class ModernTTKApp:
         
         auth_frame = ttk.Frame(self.sign_tab)
         auth_frame.grid(row=3, column=0, columnspan=3, sticky=EW, pady=5, padx=5)
-        # Normalize columns: label, control, filler/button area
-        auth_frame.columnconfigure(0, weight=0, minsize=60)
-        auth_frame.columnconfigure(1, weight=0)
-        auth_frame.columnconfigure(2, weight=1)
-        self.auth_frame = auth_frame  # expose for placing sign button next to PIN
+        # Normalize columns: PIN label, PIN entry, Multi-Sig, Sign button
+        auth_frame.columnconfigure(0, weight=0, minsize=60)  # PIN label
+        auth_frame.columnconfigure(1, weight=0)  # PIN entry
+        auth_frame.columnconfigure(2, weight=0)  # Multi-Sig checkbox
+        auth_frame.columnconfigure(3, weight=1)  # Sign button (fills remaining space)
+        self.auth_frame = auth_frame  # expose for layout reference
         
         ttk.Label(auth_frame, text="PIN:").grid(row=0, column=0, sticky=W, padx=5, pady=2)
         self.pin_var = ttk.StringVar()
@@ -566,33 +732,69 @@ class ModernTTKApp:
         # store for layout fixups and tests
         self.pin_entry = pin_entry
         pin_entry.bind('<Return>', lambda e: self.do_sign())
+        
+        # Multi-Signature Mode Checkbox (moved from options_frame, now right of PIN)
+        self.multi_sig_var = tk.BooleanVar(value=False)
+        self.multi_sig_check = ttk.Checkbutton(auth_frame, text="Çoklu İmza", variable=self.multi_sig_var, command=lambda: print("Multi-Sig Mode toggled"))
+        self.multi_sig_check.grid(row=0, column=2, sticky=W, padx=5, pady=2)
+        CreateToolTip(self.multi_sig_check, "Birden fazla kişi aynı belgeyi imzalayacaksa bu seçeneği açın", self.root)
+
+        self.sign_icon = BootstrapIcon("pen-fill", "✍️", ({"color": "white"}, {"color": "white"}))
+        self.auth_sign_btn = ttk.Button(
+            auth_frame,
+            text="İmzala",
+            image=self.sign_icon.image,
+            compound=LEFT,
+            bootstyle="success",
+            command=self.do_sign
+        )
+        self.sign_icon.attach(self.auth_sign_btn)
+        self.auth_sign_btn.grid(row=0, column=3, sticky=EW, padx=5)
+        
+        # Batch sign button
+        self.batch_icon = BootstrapIcon("collection-play-fill", "📚", ({"color": "white"}, {"color": "white"}))
+        self.batch_sign_btn = ttk.Button(
+            auth_frame,
+            text="Toplu Belge İmzalama",
+            image=self.batch_icon.image,
+            compound=LEFT,
+            bootstyle="info",
+            command=self.do_batch_sign
+        )
+        self.batch_icon.attach(self.batch_sign_btn)
+        self.batch_sign_btn.grid(row=1, column=0, columnspan=4, sticky=EW, padx=5, pady=(5,0))
+        CreateToolTip(self.batch_sign_btn, "Birden fazla belgeyi aynı anda imzalamak için bu butonu kullanın", self.root)
 
         # Optional Fields
         self.create_labeled_frame(self.sign_tab, "📝 İsteğe Bağlı", 4)
         
         optional_frame = ttk.Frame(self.sign_tab)
         optional_frame.grid(row=5, column=0, columnspan=3, sticky=EW, pady=2, padx=5)
-        optional_frame.columnconfigure(0, weight=0, minsize=90)
-        optional_frame.columnconfigure(1, weight=1)
-        optional_frame.columnconfigure(2, weight=0, minsize=40)
+        # Two equal-width columns for Reason and Location side-by-side
+        optional_frame.columnconfigure(0, weight=0, minsize=50)   # Reason label
+        optional_frame.columnconfigure(1, weight=1)                # Reason entry
+        optional_frame.columnconfigure(2, weight=0, minsize=35)   # Location label (reduced for less spacing)
+        optional_frame.columnconfigure(3, weight=1)                # Location entry
         
-        ttk.Label(optional_frame, text="Neden:").grid(row=0, column=0, sticky=W, padx=5, pady=2)
+        ttk.Label(optional_frame, text="Neden:").grid(row=0, column=0, sticky=W, padx=0, pady=0)
         self.reason_var = ttk.StringVar()
         self.reason_entry = ttk.Entry(optional_frame, textvariable=self.reason_var, bootstyle="secondary")
-        self.reason_entry.grid(row=0, column=1, columnspan=2, sticky=EW, padx=4)
+        self.reason_entry.grid(row=0, column=1, sticky=EW, padx=(0, 4))
+        self.reason_placeholder = "Örnek: Sözleşme onayı, belge doğrulama, teslimat onayı"
         # Placeholder for 'Neden' to guide users
         try:
-            self._add_entry_placeholder(self.reason_entry, "Örnek: Sözleşme onayı, belge doğrulama, teslimat onayı")
+            self._add_entry_placeholder(self.reason_entry, self.reason_placeholder)
         except Exception:
             pass
         
-        ttk.Label(optional_frame, text="Yer:").grid(row=1, column=0, sticky=W, padx=5, pady=2)
+        ttk.Label(optional_frame, text="Yer:").grid(row=0, column=2, sticky=W, padx=0, pady=0)
         self.location_var = ttk.StringVar()
         self.location_entry = ttk.Entry(optional_frame, textvariable=self.location_var, bootstyle="secondary")
-        self.location_entry.grid(row=1, column=1, columnspan=2, sticky=EW, padx=4)
+        self.location_entry.grid(row=0, column=3, sticky=EW, padx=(0, 4))
+        self.location_placeholder = "Örnek: İstanbul, Genel Müdürlük, Online"
         # Placeholder for 'Yer' to guide users
         try:
-            self._add_entry_placeholder(self.location_entry, "Örnek: İstanbul, Genel Müdürlük, Online")
+            self._add_entry_placeholder(self.location_entry, self.location_placeholder)
         except Exception:
             pass
 
@@ -1040,6 +1242,13 @@ class ModernTTKApp:
             elif hasattr(self, 'log') and self.log:
                 target = self.log
 
+            # Only print to console if there is no GUI log target
+            if not target:
+                try:
+                    print(msg)
+                except Exception:
+                    pass
+
             if target:
                 try:
                     if _should_display(msg):
@@ -1047,16 +1256,11 @@ class ModernTTKApp:
                         target.see("end")
                         return
                     else:
-                        # Message filtered out: archive silently and do not print to terminal.
+                        # Message filtered out from UI only
                         return
                 except Exception:
-                    # If inserting into widget fails, fall back to printing once
-                    try:
-                        print(msg)
-                    except Exception:
-                        pass
-                    return
-            # No UI target available: archive message silently (do not print to terminal)
+                    pass
+            # No UI target available
             return
         except Exception:
             try:
@@ -1094,7 +1298,7 @@ class ModernTTKApp:
                 self.root.after(0, lambda: self.token_combo.configure(values=['(none)']))
                 self.root.after(0, lambda: self.cert_combo.configure(values=['(none)']))
             try:
-                threading.Thread(target=self._update_tokens_from_pkcs11_lib, daemon=True).start()
+                threading.Thread(target=self._update_tokens_internal, daemon=True).start()
             except Exception:
                 pass
 
@@ -1137,7 +1341,8 @@ class ModernTTKApp:
                 self.root.after(0, lambda: self.pkcs11_var.set(chosen))
                 self.root.after(0, lambda: self.log_message(f"✅ Auto-selected: {Path(chosen).name}"))
                 try:
-                    threading.Thread(target=self._update_tokens_from_pkcs11_lib, daemon=True).start()
+                    # Pass explicit path to avoid race condition with UI var update
+                    threading.Thread(target=self._update_tokens_internal, args=(chosen,), daemon=True).start()
                 except Exception:
                     pass
             else:
@@ -1220,6 +1425,138 @@ class ModernTTKApp:
             doc.close()
         except Exception as e:
             self.log_message(f"⚠️ Önizleme şablonu oluşturulamadı: {e}")
+
+    def _show_cert_details(self):
+        selected = self._cert_combo_var.get()
+        if not selected or selected == '(none)':
+            return
+            
+        cert_obj = self._cert_map.get(selected)
+        if not cert_obj:
+            return
+
+        # Basic details display
+        try:
+            from cryptography import x509
+            msg = f"Etiket: {selected}\n"
+            if isinstance(cert_obj, dict):
+                 # Fallback if we stored a dict
+                 for k, v in cert_obj.items():
+                     msg += f"{k}: {v}\n"
+            else:
+                 # Assume it's an x509 object or has clear string rep
+                 try:
+                     subject = cert_obj.subject.rfc4514_string()
+                     issuer = cert_obj.issuer.rfc4514_string()
+                     serial = cert_obj.serial_number
+                     not_before = cert_obj.not_valid_before_utc
+                     not_after = cert_obj.not_valid_after_utc
+                     
+                     msg += f"\nKonu: {subject}"
+                     msg += f"\nVeren: {issuer}"
+                     msg += f"\nSeri No: {serial}"
+                     msg += f"\nGeçerlilik: {not_before} - {not_after}"
+                 except Exception:
+                     msg += f"\n\nRaw: {str(cert_obj)}"
+            
+            from tkinter import messagebox
+            messagebox.showinfo("Sertifika Detayları", msg)
+        except Exception as e:
+            self.log_message(f"Detay görüntüleme hatası: {e}")
+
+    def _update_tokens_internal(self, explicit_path=None):
+        if explicit_path:
+            lib_path = explicit_path
+        else:
+            # Safely get var from main thread if possible, or assume it's set if called from UI
+            try:
+                lib_path = self.pkcs11_var.get()
+            except RuntimeError:
+                # If called from thread without args and var not accessible
+                return
+
+        if not lib_path:
+            return
+
+        self.root.after(0, lambda: self.log_message("⏳ Token içeriği okunuyor..."))
+        
+        try:
+            from sign_pdf import load_pkcs11_lib, list_certs
+            
+            # Use a thread to avoid freezing UI
+            def worker():
+                try:
+                    lib = load_pkcs11_lib(lib_path)
+                    
+                    found_certs = []
+                    token_list = []
+                    
+                    # Reset maps
+                    self._cert_map = {}
+                    
+                    # Iterate slots
+                    slots = lib.get_slots(token_present=True)
+                    
+                    for slot in slots:
+                        try:
+                            token = slot.get_token()
+                            token_info = f"{token.label} ({token.serial})"
+                            token_list.append(token_info)
+                            
+                            # List certs
+                            for _, _, label, subject, issuer, serial in list_certs(lib, slot=slot):
+                                # Convert subject string to CN only
+                                # Typical subject: CN=Name Surname, O=Org, C=TR
+                                # We want just "Name Surname"
+                                cn_part = subject
+                                for part in subject.split(','):
+                                    if part.strip().startswith('CN='):
+                                        cn_part = part.strip()[3:]
+                                        break
+                                
+                                display_name = cn_part
+                                self._cert_map[display_name] = {
+                                    'slot_id': slot.slot_id,
+                                    'token_label': token.label,
+                                    'cert_label': label,
+                                    'subject': subject,
+                                    'issuer': issuer,
+                                    'serial': serial
+                                }
+                                found_certs.append(display_name)
+                                
+                        except Exception:
+                           pass
+
+                    # Update UI in main thread
+                    def update_ui():
+                        if token_list:
+                            self.token_combo['values'] = token_list
+                            self.token_combo.current(0)
+                        else:
+                            self.token_combo['values'] = ['(bulunamadı)']
+                            self.token_combo.set('(bulunamadı)')
+                            
+                        if found_certs:
+                            self.cert_combo['values'] = found_certs
+                            self.cert_combo.current(0)
+                            self._cert_combo_var.set(found_certs[0])
+                            self._update_signature_image_display()
+                            self.log_message(f"✅ {len(found_certs)} sertifika listelendi.")
+                        else:
+                            self.cert_combo['values'] = ['(sertifika yok)']
+                            self._cert_combo_var.set('(sertifika yok)')
+                            self.log_message("⚠️ Token bulundu ama sertifika okunamadı.")
+
+                    self.root.after(0, update_ui)
+                    
+                except Exception as e:
+                    self.root.after(0, lambda: self.log_message(f"❌ Token okuma hatası: {e}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+            
+        except Exception as e:
+             self.log_message(f"❌ Kütüphane yükleme hatası: {e}")
 
     def refresh_token(self):
         self.log_message("🔄 Token bilgisi yenileniyor...")
@@ -1352,8 +1689,14 @@ class ModernTTKApp:
             key_label=None,
             in_path=self.in_var.get(),
             out_path=self.out_var.get(),
-            reason=self.reason_var.get(),
-            location=self.location_var.get()
+            reason=self._get_entry_value(self.reason_entry, getattr(self, 'reason_placeholder', None)),
+            location=self._get_entry_value(self.location_entry, getattr(self, 'location_placeholder', None)),
+            compress_pdf=self.compress_pdf_var.get(),
+            ltv_enabled=self.ltv_var.get(),
+            tsa_url=self.default_tsa_url if getattr(self, 'tsa_enabled_var', None) and self.tsa_enabled_var.get() else '',
+            docmdp_mode=self._docmdp_map.get(self.docmdp_var.get(), 'signing_only') if getattr(self, '_docmdp_map', None) else 'signing_only',
+            visual_stamp_path=str(TEMP_DIR / "gui_preview_sig.png"),
+            multi_sig_mode=self.multi_sig_var.get()
         )
 
         self.log_message("✍️ İmzalama işlemi başlatılıyor...")
@@ -1380,13 +1723,28 @@ class ModernTTKApp:
                 sign_cmd(args, gui_logger=self.log_message)
                 try:
                     if args.out_path and os.path.exists(args.out_path):
-                        os.startfile(args.out_path)
-                except Exception:
-                    pass
+                        self.log_message(f"📂 Dosya açılıyor: {args.out_path}")
+                        try:
+                            os.startfile(args.out_path)
+                        except Exception as open_err:
+                            self.log_message(f"⚠️ Dosya açma hatası: {open_err}")
+                            # Fallback to webbrowser
+                            try:
+                                import webbrowser
+                                webbrowser.open(args.out_path)
+                            except Exception as wb_err:
+                                self.log_message(f"⚠️ Fallback hatası: {wb_err}")
+                except Exception as e:
+                     self.log_message(f"⚠️ Dosya yolu hatası: {e}")
             except Exception as exc:
-                msg = str(exc)
-                self.root.after(0, lambda m=msg: messagebox.showerror("İmza hatası", m))
-                self.root.after(0, lambda m=msg: self.log_message(f"⚠️ Hata: {m}"))
+                if isinstance(exc, PermissionError):
+                    msg = str(exc) or "Çıkış dosyası başka bir program tarafından açık. Lütfen kapatıp tekrar deneyin."
+                    self.root.after(0, lambda m=msg: messagebox.showwarning("Dosya açık", m))
+                    self.root.after(0, lambda m=msg: self.log_message(f"⚠️ {m}"))
+                else:
+                    msg = str(exc)
+                    self.root.after(0, lambda m=msg: messagebox.showerror("İmza hatası", m))
+                    self.root.after(0, lambda m=msg: self.log_message(f"⚠️ Hata: {m}"))
             finally:
                 self.root.after(0, lambda: self.auth_sign_btn.configure(state="normal"))
                 self.root.after(0, self._close_progress_modal)
@@ -1498,8 +1856,11 @@ Devam etmek istiyor musunuz?"""
                             key_label=None,
                             in_path=str(pdf_file),
                             out_path=str(output_file),
-                            reason=self.reason_var.get(),
-                            location=self.location_var.get()
+                            reason=self._get_entry_value(self.reason_entry, getattr(self, 'reason_placeholder', None)),
+                            location=self._get_entry_value(self.location_entry, getattr(self, 'location_placeholder', None)),
+                            ltv_enabled=self.ltv_var.get(),
+                            tsa_url=self.default_tsa_url if getattr(self, 'tsa_enabled_var', None) and self.tsa_enabled_var.get() else '',
+                            docmdp_mode=self._docmdp_map.get(self.docmdp_var.get(), 'signing_only') if getattr(self, '_docmdp_map', None) else 'signing_only'
                         )
                         
                         # Sign the file
@@ -2458,6 +2819,23 @@ Devam etmek istiyor musunuz?"""
         except Exception:
             pass
 
+    def _save_signing_settings(self):
+        """Persist signing options (LTV, TSA enabled, DocMDP) to config."""
+        try:
+            if getattr(self, 'config', None) is None:
+                self.config = {}
+            self.config.setdefault('signing', {})['ltv_enabled'] = bool(self.ltv_var.get())
+            self.config['signing']['tsa_enabled'] = bool(self.tsa_enabled_var.get())
+            try:
+                display = self.docmdp_var.get()
+                mode = self._docmdp_map.get(display, 'signing_only')
+            except Exception:
+                mode = 'signing_only'
+            self.config['signing']['docmdp_mode'] = mode
+            save_config(self.config)
+        except Exception:
+            pass
+
     def _on_placement_change(self):
         """Handle placement change - reset margins to 0 for center placement."""
         try:
@@ -2518,6 +2896,21 @@ Devam etmek istiyor musunuz?"""
             entry.bind('<FocusOut>', _on_focus_out)
         except Exception:
             pass
+
+    def _get_entry_value(self, entry, placeholder_text=None):
+        """Return entry value unless it is empty or equals the placeholder."""
+        try:
+            val = entry.get()
+        except Exception:
+            return ''
+        if not val:
+            return ''
+        trimmed = val.strip()
+        if not trimmed:
+            return ''
+        if placeholder_text and trimmed == placeholder_text:
+            return ''
+        return trimmed
 
     def _show_progress_modal(self):
         try:
@@ -2668,7 +3061,6 @@ Devam etmek istiyor musunuz?"""
             email_label.config(cursor="arrow")
         
         def on_email_click(e):
-            import webbrowser
             webbrowser.open("mailto:selimsagol@hotmail.com")
         
         email_label.bind("<Enter>", on_email_enter)
@@ -2848,6 +3240,69 @@ Devam etmek istiyor musunuz?"""
                 "Hata",
                 f"Yardım kılavuzu açılırken hata oluştu:\n{str(e)}"
             )
+
+    def _show_signing_help(self):
+        """Show comprehensive modal explaining all signing options (LTV, TSA, DocMDP)."""
+        try:
+            title = "İmzalama Seçenekleri"
+            body = (
+                "LTV (Long-Term Validation):\n"
+                "İmza anındaki doğrulama verilerini (OCSP/CRL gibi) PDF içine gömerek,\n"
+                "belgenin yıllar sonra da doğrulanabilmesini sağlar. Resmi/uzun süreli belgeler için ON yapın.\n\n"
+                "TSA (Timestamp Authority / Zaman Damgası):\n"
+                "İmza zamanını güvenilir bir zaman kaynağı ile damgalar. Müşteri belgeler için\n"
+                "E-İmza Kanunu gereği imza zamanının güvenilir olması gerekir. İnternet varsa\n"
+                "TSA otomatik açılır. Varsayılan URL: timestamp.digicert.com\n\n"
+                "MDP (Certification Permissions / Doküman Değişiklik İzinleri):\n"
+                "İmzadan sonra belgeye hangi değişikliklere izin verileceğini belirler.\n\n"
+                "Seçenekler:\n"
+                "• Sadece imza: Sadece yeni imza eklenebilir (form/yorum kapalı)\n"
+                "• Form doldurma + imza: Form alanları doldurulabilir\n"
+                "• Form + yorum + imza: Yorum ve ek açıklamalar için izin verilir\n\n"
+                "E-İmza ruhuna uygun olarak, doküman imzalandıktan sonra değişmemelidir.\n"
+                "LTV ve TSA'nın birlikte kullanılması, elektronik imzanın hukuki geçerliliğini arttırır."
+            )
+
+            help_win = Toplevel(self.root)
+            help_win.title(title)
+            help_win.geometry("620x500")
+            help_win.transient(self.root)
+            help_win.grab_set()
+            
+            frame = ttk.Frame(help_win, padding=12)
+            frame.pack(fill=BOTH, expand=YES)
+            lbl = ttk.Label(frame, text=body, justify=LEFT, wraplength=580)
+            lbl.pack(fill=BOTH, expand=YES)
+            ttk.Button(frame, text="Kapat", command=help_win.destroy).pack(anchor=E, pady=(8, 0))
+            
+            # Center the window on the main window with delayed positioning
+            def center_window():
+                try:
+                    # Get main window center
+                    mw = self.root.winfo_width()
+                    mh = self.root.winfo_height()
+                    mx = self.root.winfo_x()
+                    my = self.root.winfo_y()
+                    
+                    # Get help window size
+                    hw = help_win.winfo_width()
+                    hh = help_win.winfo_height()
+                    
+                    # Calculate center position
+                    x = mx + (mw - hw) // 2
+                    y = my + (mh - hh) // 2
+                    
+                    help_win.geometry(f"+{max(0, x)}+{max(0, y)}")
+                except Exception:
+                    pass
+            
+            # Schedule centering after window is rendered
+            help_win.after(100, center_window)
+        except Exception as e:
+            try:
+                messagebox.showinfo("Bilgi", str(e))
+            except Exception:
+                pass
 
     def _center_window(self):
         """Center the main window on the screen."""

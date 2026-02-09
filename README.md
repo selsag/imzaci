@@ -1,4 +1,4 @@
-﻿# PDF İmzacı - Profesyonel PDF İmza Uygulaması
+﻿# PDF İmzacı - Profesyonel PDF İmza Uygulaması v2.4
 
 Türkçe, Python tabanlı PDF dijital imzalama uygulaması. PKCS#11 uyumlu tokenlar (USB e-imza, akıllı kartlar, HSM'ler) ile PAdES (ISO 32000-2) standartında imza atar.
 
@@ -19,7 +19,13 @@ Veya aşağıda Python ile kurulum yap.
 - 🔑 **Güvenli PIN Giriş** - Maskeli giriş, asla diske yazılmaz
 - 📊 **Gerçek-zamanlı Log** - İşlem geçmişi ve hata mesajları
 - 🛡️ **Hata Toleransı** - Fallback stratejileri ve anlaşılır hata mesajları
+### 🆕 Gelişmiş Özellikler (v2.4)
 
+- **🔗 Çoklu İmzalama** - Birden fazla kişi aynı belgeyi ardı ardına imzalayabilir
+- **⏰ Zaman Damgası (TSA)** - İmza zamanını resmi olarak kayıt altına al
+- **📦 Süresi Uzatma (LTV)** - Sertifika zincirini PDF'e gömülerek yıllar sonra doğrulama
+- **🔒 Belge Kısıtlamaları (DocMDP)** - 3 seviye izin kontrolü (İmza-sadece, Form+İmza, Form+Yorum+İmza)
+- **📚 Toplu Belge İmzalama** - 100+ PDF'yi bir kez imzala, otomatik işleme devam et
 ## 📋 Gereksinimler
 
 - Python 3.8+
@@ -70,6 +76,40 @@ python -m imzaci
    - PIN'i girin (maskeli giriş)
    - "İmzala" butonuna basın
    - Log penceresinde ilerlemeyi izleyin
+
+### Gelişmiş Seçenekler
+
+#### Çoklu İmzalama (Multi-Signature)
+```
+Hukuki süreç: Talep Eden → Onaylayan → Genel Müdür
+Her bir kişi:
+1. İmzalı PDF'yi giriş dosyası olarak seç
+2. "Çoklu İmza" checkbox'ını işaretle
+3. İmzala → Yeni imza eklenir (belgem_signed_2.pdf)
+```
+
+#### Zaman Damgası (TSA) & Süresi Uzatma (LTV)
+```
+"TSA" checkbox: İmza zamanını resmi sunucudan kaydettir
+"LTV" checkbox: Sertifika zincirini PDF'e göm (uzun vadeli geçerlilik)
+```
+
+#### Belge Kısıtlamaları (DocMDP)
+```
+"Sadece İmza": İmza eklenmesi dışında hiçbir değişiklik
+"Form Doldurma + İmza": Form alanları doldurulabilir
+"Form + Yorum + İmza": Notlar ve yorumlar eklenebilir
+```
+
+### Toplu Belge İmzalama
+
+```
+1. "Toplu Belge İmzalama" butonuna tıkla
+2. İmzalanacak PDF'lerin klasörünü seç
+3. Çıkış klasörünü seç (otomatik ayarlanır)
+4. PIN ve ayarlarla 100+ dosya otomatik imzala
+5. Hata varsa devam et, rapor döndür
+```
 
 ### CLI İle (Opsiyonel)
 
@@ -182,5 +222,5 @@ Bu proje açık kaynaklı olup eğitim ve ticari amaçla kullanılabilir.
 
 ---
 
-**Son Güncelleme:** Ocak 2026  
-**Versiyon:** 2.3
+**Son Güncelleme:** Şubat 2026  
+**Versiyon:** 2.4
