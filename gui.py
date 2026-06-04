@@ -1223,14 +1223,22 @@ class ModernTTKApp:
             # Helper: determine whether message should be displayed according to filter
             def _should_display(m):
                 try:
+                    # If it's an error or warning, ALWAYS display
+                    if any(marker in m for marker in ['❌', '⚠️', '🚨', '🧾']):
+                        return True
+                        
                     # If no filter configured, display everything
                     if not getattr(self, '_log_enabled_numbers', None):
                         return True
-                    # Use matchers map to check if message belongs to an enabled number
+                        
+                    # Whitelist check
                     for num in self._log_enabled_numbers:
                         pat = self._log_matchers.get(num)
                         if pat and pat in m:
                             return True
+                            
+                    # Default: Hide generic info if filtering is active, 
+                    # but since we want to be helpful, let's keep it somewhat open
                     return False
                 except Exception:
                     return True
@@ -1737,14 +1745,20 @@ class ModernTTKApp:
                 except Exception as e:
                      self.log_message(f"⚠️ Dosya yolu hatası: {e}")
             except Exception as exc:
+                import traceback
+                msg = str(exc).strip()
+                if not msg:
+                    msg = exc.__class__.__name__
+                full_trace = traceback.format_exc()
                 if isinstance(exc, PermissionError):
-                    msg = str(exc) or "Çıkış dosyası başka bir program tarafından açık. Lütfen kapatıp tekrar deneyin."
-                    self.root.after(0, lambda m=msg: messagebox.showwarning("Dosya açık", m))
-                    self.root.after(0, lambda m=msg: self.log_message(f"⚠️ {m}"))
+                    display_msg = msg or "Çıkış dosyası başka bir program tarafından açık. Lütfen PDF görüntüleyiciyi kapatıp tekrar deneyin."
+                    self.root.after(0, lambda m=display_msg: messagebox.showwarning("Dosya açık", m))
+                    self.root.after(0, lambda m=display_msg: self.log_message(f"⚠️ {m}"))
                 else:
-                    msg = str(exc)
-                    self.root.after(0, lambda m=msg: messagebox.showerror("İmza hatası", m))
-                    self.root.after(0, lambda m=msg: self.log_message(f"⚠️ Hata: {m}"))
+                    display_msg = msg or "Bilinmeyen bir imzalama hatası oluştu."
+                    self.root.after(0, lambda m=display_msg: self.log_message(f"⚠️ Hata: {m}"))
+                    self.root.after(0, lambda m=display_msg: messagebox.showerror("İmza hatası", m))
+                self.root.after(0, lambda ft=full_trace: self.log_message(f"🧾 Hata izi:\n{ft}"))
             finally:
                 self.root.after(0, lambda: self.auth_sign_btn.configure(state="normal"))
                 self.root.after(0, self._close_progress_modal)
@@ -1752,14 +1766,44 @@ class ModernTTKApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def do_batch_sign(self):
-        """Batch sign all PDF files in the same directory as the selected input file."""
-        # Auto-action: Browse for input if not selected
-        if not self.in_var.get():
-            self._show_notification("📂 Dosya seçim penceresini açıyorum...")
-            self.root.after(500, self._auto_browse_input)
+        """Batch sign all PDF files in a selected directory."""
+        import pathlib
+        
+        # Step 1: Select folder with clear instructions
+        self._show_notification("📂 İmzalanacak PDF dosyalarının klasörünü seçin...")
+        directory = filedialog.askdirectory(
+            title="📁 Toplu İmzalama - Klasör Seçin\n(İçindeki TÜM .pdf dosyaları imzalanacak)"
+        )
+        
+        if not directory:
+            self._show_notification("❌ Klasör seçilmedi")
             return
         
-        # Auto-action: Focus PIN field if empty
+        directory = pathlib.Path(directory)
+        
+        # Step 2: Find all PDF files in the directory
+        pdf_files = sorted(list(directory.glob("*.pdf")))
+        
+        if not pdf_files:
+            self._show_notification(f"❌ Seçilen klasörde PDF dosyası bulunamadı")
+            return
+
+        # Step 3: Auto-populate input and output fields
+        # Input: first PDF or folder path
+        first_pdf = str(pdf_files[0])
+        self.in_var.set(first_pdf)
+        
+        # Output: imzalananlar subfolder
+        output_folder = directory / "imzalananlar"
+        output_folder.mkdir(exist_ok=True)
+        self.out_var.set(str(output_folder / pdf_files[0].name))
+        
+        # Log the selected folder and file count
+        self.log_message(f"📁 Seçilen Klasör: {directory}")
+        self.log_message(f"📄 Bulundu: {len(pdf_files)} PDF dosyası")
+        self.log_message(f"💾 Çıkış: {output_folder}")
+
+        # Step 4: Validate PIN and PKCS#11
         if not self.pin_var.get().strip():
             self._show_notification("🔐 PIN kodunu girmeniz gerekli")
             try:
@@ -1773,40 +1817,26 @@ class ModernTTKApp:
             self._show_notification("🔑 PKCS#11 DLL seçimi gerekli")
             return
 
-        # Get directory of selected file
-        import pathlib
-        selected_file = pathlib.Path(self.in_var.get())
-        if not selected_file.exists():
-            self._show_notification(f"❌ Dosya bulunamadı: {selected_file.name}")
-            return
-
-        directory = selected_file.parent
-        
-        # Find all PDF files in the directory (including selected file)
-        pdf_files = list(directory.glob("*.pdf"))
-        # Note: Selected file is included in the batch
-        
-        if not pdf_files:
-            self._show_notification(f"❌ Klasörde PDF dosyası bulunamadı")
-            return
-
-        # Show confirmation dialog
-        file_list = "\n".join(f"• {f.name}" for f in pdf_files[:10])  # Show first 10 files
-        if len(pdf_files) > 10:
-            file_list += f"\n... ve {len(pdf_files) - 10} dosya daha"
+        # Step 5: Show confirmation dialog
+        file_list = "\n".join(f"• {f.name}" for f in pdf_files[:15])  # Show first 15 files
+        if len(pdf_files) > 15:
+            file_list += f"\n... ve {len(pdf_files) - 15} dosya daha"
         
         confirm_msg = f"""Toplu imzalama işlemi başlatılacak.
 
-📁 Klasör: {directory}
+📁 Klasör: {directory.name}
 📄 Toplam dosya sayısı: {len(pdf_files)}
 
 İmzalanacak dosyalar:
 {file_list}
 
 ⚠️  Uyarı: Tüm dosyalar aynı imza ayarları ile imzalanacaktır.
+⚠️  Çıkış: '{output_folder.name}' klasörüne kaydedilecektir.
+
 Devam etmek istiyor musunuz?"""
 
         if not messagebox.askyesno("Toplu İmza Onayı", confirm_msg):
+            self._show_notification("İşlem iptal edildi")
             return
 
         # Get certificate selection
@@ -1858,9 +1888,12 @@ Devam etmek istiyor musunuz?"""
                             out_path=str(output_file),
                             reason=self._get_entry_value(self.reason_entry, getattr(self, 'reason_placeholder', None)),
                             location=self._get_entry_value(self.location_entry, getattr(self, 'location_placeholder', None)),
+                            compress_pdf=self.compress_pdf_var.get(),
                             ltv_enabled=self.ltv_var.get(),
                             tsa_url=self.default_tsa_url if getattr(self, 'tsa_enabled_var', None) and self.tsa_enabled_var.get() else '',
-                            docmdp_mode=self._docmdp_map.get(self.docmdp_var.get(), 'signing_only') if getattr(self, '_docmdp_map', None) else 'signing_only'
+                            docmdp_mode=self._docmdp_map.get(self.docmdp_var.get(), 'signing_only') if getattr(self, '_docmdp_map', None) else 'signing_only',
+                            visual_stamp_path=str(TEMP_DIR / "gui_preview_sig.png"),
+                            multi_sig_mode=self.multi_sig_var.get()
                         )
                         
                         # Sign the file

@@ -1255,13 +1255,27 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
         import time
         signature_field_name = f"Signature_{int(time.time())}"
         
-        signer = PKCS11Signer(
-            pkcs11_session=session,
-            key_label=key_label,
-            cert_label=cert_label,
-            use_raw_mechanism=True,
-            prefer_pss=True,
-        )
+        try:
+            signer = PKCS11Signer(
+                pkcs11_session=session,
+                key_label=key_label,
+                cert_label=cert_label,
+                use_raw_mechanism=True,
+                prefer_pss=True,
+            )
+        except Exception as signer_err:
+            signer_err_text = str(signer_err)
+            if 'RSASSA-PSS not available in raw mode' in signer_err_text:
+                _log('⚠️ Token raw modda RSASSA-PSS desteklemiyor, PKCS#1 v1.5 ile yeniden deneniyor')
+                signer = PKCS11Signer(
+                    pkcs11_session=session,
+                    key_label=key_label,
+                    cert_label=cert_label,
+                    use_raw_mechanism=True,
+                    prefer_pss=False,
+                )
+            else:
+                raise
         # Certification: set DocMDP permissions on first signature if configured
         cert_kwargs = {}
         docmdp_mode = getattr(args, 'docmdp_mode', 'signing_only')
@@ -1295,17 +1309,11 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
         logo_imza_path = Path(custom_sig_path) if custom_sig_path and Path(custom_sig_path).exists() else resource_path('logo_imza.png')
 
 
-        # Visual/Stamp Logic for Incremental Signing (Multi-Signature)
+        # Visual/Stamp Logic (for Page 0)
+        # We always want to calculate this if a logo exists, to enable visual signatures on Page 0.
         multi_sig_mode = getattr(args, 'multi_sig_mode', True)
-        _log(f"")
-        _log(f"═══ PYHANKO STAMP STAGE ═══")
-        _log(f"multi_sig_mode={multi_sig_mode}, is_signed_already={is_signed_already}")
-        _log(f"═══════════════════════════")
-        _log(f"🔎 DEBUG: Incremental Check - is_signed: {is_signed_already}, MultiSig: {multi_sig_mode}, logo_exists: {logo_imza_path.exists()}")
-        
-        # Enter block if Signed OR (Unsigned + MultiSigMode)
-        if (is_signed_already or multi_sig_mode) and logo_imza_path.exists():
-            _log("➡️ Entering Incremental Stamp Block")
+        if logo_imza_path.exists():
+            _log("➡️ Calculating Visual Signature (Page 0)")
             try:
                 # Use pyHanko's Stamp mechanism for incremental visual signatures
                 from pyhanko.stamp import StaticStampStyle
@@ -1464,6 +1472,7 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
                     # We need page height to map coordinates (PySDK/PDF uses Bottom-Left origin)
                     page_h_pts = 842.0 # Default A4 height points
                     page_w_pts = 595.0
+                    rotate = 0
                     try:
                          with open(args.in_path, 'rb') as inf:
                              _reader = PdfReader(inf)
@@ -1471,8 +1480,20 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
                              _cb = _reader.pages[0].mediabox
                              page_w_pts = float(_cb[2]) - float(_cb[0])
                              page_h_pts = float(_cb[3]) - float(_cb[1])
+                             try:
+                                 rotate = int(_reader.pages[0].rotation) % 360
+                             except Exception:
+                                 rotate = int(_reader.pages[0].get('/Rotate', 0)) % 360
                     except Exception:
                          pass
+
+                    # Determine VIEW (Visual) dimensions
+                    if rotate in (90, 270):
+                        view_w_pts = page_h_pts
+                        view_h_pts = page_w_pts
+                    else:
+                        view_w_pts = page_w_pts
+                        view_h_pts = page_h_pts
 
                     # Convert mm margins to points
                     mx = (margin_x_val / 25.4) * 72.0
@@ -1481,25 +1502,59 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
                     # height ratio from image
                     vis_h = (img_obj.height / img_obj.width) * vis_w
                     
-                    # Calculate X,Y (Bottom-Left based)
+                    # 1. Calculate coordinates in VISUAL space (Origin Top-Left)
                     if placement == 'top-right':
-                        x = page_w_pts - mx - vis_w
-                        y = page_h_pts - my - vis_h
+                        vis_x = view_w_pts - mx - vis_w
+                        vis_y = my
                     elif placement == 'top-left':
-                        x = mx
-                        y = page_h_pts - my - vis_h
+                        vis_x = mx
+                        vis_y = my
                     elif placement == 'bottom-right':
-                        x = page_w_pts - mx - vis_w
-                        y = my
+                        vis_x = view_w_pts - mx - vis_w
+                        vis_y = view_h_pts - my - vis_h
                     elif placement == 'bottom-left':
-                        x = mx
-                        y = my
+                        vis_x = mx
+                        vis_y = view_h_pts - my - vis_h
                     elif placement == 'center':
-                        x = (page_w_pts - vis_w) / 2
-                        y = (page_h_pts - vis_h) / 2
+                        vis_x = (view_w_pts - vis_w) / 2 + mx
+                        vis_y = (view_h_pts - vis_h) / 2 + my
                     else:
-                        x = page_w_pts - mx - vis_w
-                        y = page_h_pts - my - vis_h
+                        vis_x = view_w_pts - mx - vis_w
+                        vis_y = my
+
+                    # 2. Map Visual Coordinates to Physical PDF space (Bottom-Left origin)
+                    # Calculate center in Visual space
+                    cxV = vis_x + vis_w / 2.0
+                    cyV = vis_y + vis_h / 2.0
+                    
+                    if rotate == 0:
+                        pcx = cxV
+                        pcy = view_h_pts - cyV
+                    elif rotate == 90:
+                        # R=90 CW: Phys Origin BL maps to Visual TL
+                        pcx = cyV
+                        pcy = cxV
+                    elif rotate == 180:
+                        pcx = view_w_pts - cxV
+                        pcy = cyV
+                    elif rotate == 270:
+                        pcx = view_w_pts - cyV
+                        pcy = view_h_pts - cxV
+                    else:
+                        pcx = cxV
+                        pcy = view_h_pts - cyV
+
+                    # Calculate final box points (Bottom-Left based)
+                    x = pcx - vis_w / 2.0
+                    y = pcy - vis_h / 2.0
+
+                    # Create Style
+                    # Note: We use the *calculated* box in field_spec, effectively overriding stamp layout
+                    # But providing the style ensures the AP stream is written.
+                    stm_path = str(stamp_img_path)
+                    _log(f"📌 Stamp Image Path: {stm_path}")
+                    if not stamp_img_path.exists():
+                        _log(f"❌ Error: Stamp image file missing at {stm_path}")
 
                     # Create Style
                     # Note: We use the *calculated* box in field_spec, effectively overriding stamp layout
@@ -1612,12 +1667,15 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
              args.in_path = repair_pdf(args.in_path)
 
         # ==================================================================================
-        # CRITICAL FIX: In multi-sig mode unsigned, do overlay merge BEFORE signing
-        # So: Merge overlay -> Update args.in_path -> Then sign the merged file
+        # CRITICAL FIX: Pre-sign overlay merge (Multi-page logo)
+        # Handle "Add logo to all pages" by merging background pages before signing Page 0
         # ==================================================================================
-        if multi_sig_mode and not is_signed_already and logo_imza_path.exists():
+        sig_conf_local = load_config().get('signature', {})
+        add_logo_all_pages = sig_conf_local.get('add_logo_all_pages', True)
+        
+        if not is_signed_already and add_logo_all_pages and logo_imza_path.exists():
              _log(f"")
-             _log(f"═══ PRE-SIGNING OVERLAY MERGE (Multi-Sig) ═══")
+             _log(f"═══ PRE-SIGNING OVERLAY MERGE (Multi-Page Logo) ═══")
              try:
                  from PyPDF2 import PdfReader, PdfWriter
                  
@@ -1678,13 +1736,31 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
                  )
                  
                  if result_img:
-                     # Add to overlay PDF at bottom-right (or configured placement)
-                     # Simple placement for pages 1+: bottom-right
-                     margin = 5.0
-                     pdf.image(str(combined_path), 
-                              x=page_w_mm - margin - actual_w_mm,
-                              y=page_h_mm - margin - (result_img.height / result_img.width) * actual_w_mm,
-                              w=actual_w_mm)
+                     # Respect configured placement for background pages
+                     try:
+                         _sc = load_config().get('signature', {})
+                         _place = _sc.get('placement', 'top-right')
+                         _mx = float(_sc.get('margin_x_mm', 5.0))
+                         _my = float(_sc.get('margin_y_mm', 5.0))
+                     except:
+                         _place, _mx, _my = 'bottom-right', 5.0, 5.0
+
+                     img_h_mm = (result_img.height / result_img.width) * actual_w_mm
+                     
+                     if _place == 'top-left':
+                         x_pos, y_pos = _mx, _my
+                     elif _place == 'top-right':
+                         x_pos, y_pos = page_w_mm - _mx - actual_w_mm, _my
+                     elif _place == 'bottom-left':
+                         x_pos, y_pos = _mx, page_h_mm - _my - img_h_mm
+                     elif _place == 'bottom-right':
+                         x_pos, y_pos = page_w_mm - _mx - actual_w_mm, page_h_mm - _my - img_h_mm
+                     elif _place == 'center':
+                         x_pos, y_pos = (page_w_mm - actual_w_mm)/2, (page_h_mm - img_h_mm)/2
+                     else:
+                         x_pos, y_pos = page_w_mm - _mx - actual_w_mm, page_h_mm - _my - img_h_mm
+
+                     pdf.image(str(combined_path), x=x_pos, y=y_pos, w=actual_w_mm)
                  
                  pdf.output(str(temp_overlay_for_presign))
                  
@@ -1755,8 +1831,16 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
         
         # Define writer here to potentially modify it
         with open(args.in_path, 'rb') as inf:
-            # Always use incremental writer for this flow
-            writer = IncrementalPdfFileWriter(inf)
+            # Use IncrementalPdfFileWriter only if the file is already signed OR we need to preserve existing structure.
+            # But for the first signature of a merged file, we can also use it.
+            # The issue might be pyHanko's version-specific behavior with IncrementalPdfFileWriter on pypdf-generated files.
+            try:
+                from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+                writer = IncrementalPdfFileWriter(inf)
+                _log("✅ IncrementalPdfFileWriter initialized")
+            except Exception as e:
+                _log(f"⚠️ IncrementalPdfFileWriter failed, trying basic reader/writer: {e}")
+                raise e # For now, let's see why it fails
             
             # Check config for all-pages setting
             add_logo_all_pages = sig_conf.get('add_logo_all_pages', True) # Default to True if not set? Or check gui logic
@@ -1794,1018 +1878,45 @@ def sign_cmd(args, add_logo_all_pages=True, use_xobject_opt=True, gui_logger=Non
                     _log(f"⚠️ Failed to add stamps to all pages: {e}")
 
             # Commit the signature
-            with open(args.out_path, 'wb') as outf:
-                pdf_signer.sign_pdf(
-                    writer, output=outf,
+            try:
+                with open(args.out_path, 'wb') as outf:
+                    # CRITICAL: existing_fields_only=False allows pyHanko to create the new visual field
+                    pdf_signer.sign_pdf(
+                        writer, output=outf,
+                        existing_fields_only=False
+                    )
+            except Exception as sign_err:
+                sign_err_text = str(sign_err)
+                if 'RSASSA-PSS not available in raw mode' not in sign_err_text:
+                    raise
+
+                _log('⚠️ RSASSA-PSS raw mode desteklenmiyor, PKCS#1 v1.5 fallback ile tekrar deneniyor')
+
+                fallback_signer = PKCS11Signer(
+                    pkcs11_session=session,
+                    key_label=key_label,
+                    cert_label=cert_label,
+                    use_raw_mechanism=True,
+                    prefer_pss=False,
                 )
-        
-        # Logo'yu PDF'ye ekle (FPDF2 ile - transparency'yi daha iyi korur)
-        # SADECE İMZASIZ İSE! (The old logic follows)
-        if False: # We handled signing above, disabling old flow for this block is safer? 
-            # Wait, the structure of this file is confusing. 
-            # The code below "if (not is_signed_already)..." handles the Unsigned case.
-            # We are inside "sign_cmd".
-            # If is_signed_already, we just did signing above.
-            # We should RETURN here or ensure we don't fall through to the Unsigned logic.
+                fallback_signer_kwargs = dict(signer_kwargs)
+                fallback_signer_kwargs['signer'] = fallback_signer
+                fallback_pdf_signer = signers.PdfSigner(**fallback_signer_kwargs)
+
+                # Recreate writer from source PDF for a clean retry.
+                with open(args.in_path, 'rb') as inf_retry:
+                    writer_retry = IncrementalPdfFileWriter(inf_retry)
+                    with open(args.out_path, 'wb') as outf:
+                        fallback_pdf_signer.sign_pdf(
+                            writer_retry, output=outf,
+                            existing_fields_only=False
+                        )
+            
             return True
 
-        if (not is_signed_already) and logo_imza_path.exists() and not multi_sig_mode:
-             # ... existing unsigned logic ...
-            _log(f"")
-            _log(f"═══ OVERLAY MERGE STAGE (Single-Sig Mode) ═══")
-            _log(f"File is UNSIGNED, creating overlay and merging")
-            _log(f"═════════════════════════════")
-            from PyPDF2 import PdfReader, PdfWriter
-            from PIL import Image as PILImage
-            from fpdf import FPDF
-            
-             # FPDF2 ile overlay PDF oluştur - cache'den kullan
-            temp_overlay = TEMP_DIR / 'temp_overlay.pdf'
-            temp_overlay.parent.mkdir(parents=True, exist_ok=True)
-            
-            # ... (Rest of existing logic for unsigned files) ...
-            # We must be careful not to break indentation of following lines
-            # I will assume existing lines follow
-            
-            # Always regenerate the overlay for each signing so signer info is current and embedded
-            # Determine input PDF page size and rotation
-            page_w_mm = 210.0
-            page_h_mm = 297.0
-            rotate = 0
-            
-            try:
-                with open(args.in_path, 'rb') as inf:
-                    _reader = PdfReader(inf)
-                    _p0 = _reader.pages[0]
-                    _m = _p0.mediabox
-                    pw_pt = float(_m[2]) - float(_m[0])
-                    ph_pt = float(_m[3]) - float(_m[1])
-                    # Normalize strict absolute values
-                    page_w_mm = abs(pw_pt) / 72.0 * 25.4
-                    page_h_mm = abs(ph_pt) / 72.0 * 25.4
-                    
-                    try:
-                        # Use PyPDF2 rotation property which handles inheritance
-                        rotate = int(_p0.rotation) % 360
-                    except Exception:
-                        try:
-                            rotate = int(_p0.get('/Rotate', 0)) % 360
-                        except Exception:
-                            rotate = 0
-            except Exception:
-                pass
-
-            pdf = FPDF(unit='mm', format=(page_w_mm, page_h_mm))
-            pdf.add_page()
-
-            # Prepare and add signature image (logo_imza) first so XObject optimization picks it up
-            logo_imza_for_pdf = None
-            if logo_imza_path.exists():
-                # Signature settings: width_mm, margin_mm, placement (GUI-configurable or from config file)
-                try:
-                    owner = getattr(gui_logger, '__self__', None)
-                    sig_conf = owner.config.get('signature', {}) if owner else load_config().get('signature', {})
-
-                except Exception:
-                    sig_conf = load_config().get('signature', {})
-
-                # Ensure defaults are robust
-                sig_conf_local = sig_conf or {}
-                # Fix: Default block width should be reasonable if missing (e.g. 40mm)
-                block_width_mm = float(sig_conf_local.get('width_mm', DEFAULT_SIGNATURE_SETTINGS.get('width_mm', 40.0)))
-                # Fix: Default logo width (for simplified mode) should be reasonable (e.g. 20mm)
-                logo_width_mm = float(sig_conf_local.get('logo_width_mm', DEFAULT_SIGNATURE_SETTINGS.get('logo_width_mm', 20.0)))
-
-                # Check if user provided a visual stamp - if so, TRUST its dimensions or the calculated one
-                # The 'suspicious' check below (block_width_mm < 10) causes issue if the config has a default 0 or small value
-                # but we actually intend to calculate it from the image later.
-                # However, at this point block_width_mm comes from CONFIG. 
-                # If we have a provided stamp, we should temporarily allow it or defer the check.
-                
-                is_provided_stamp = hasattr(args, 'visual_stamp_path') and args.visual_stamp_path and Path(args.visual_stamp_path).exists()
-                
-                if block_width_mm < 10 and not is_provided_stamp:
-                    _log(f"⚠️ Warning: block_width_mm is suspicious (<10mm), defaulting to 40mm")
-                    block_width_mm = 40.0
-                
-                # CRITICAL Fix: If we have a provided stamp, calculate its width immediately so subsequent logic (coordinates, logs) uses the correct size.
-                if is_provided_stamp:
-                     try:
-                         # We need to compute width from image path now
-                         visual_path = Path(args.visual_stamp_path)
-                         if visual_path.exists():
-                             from PIL import Image as PILImage
-                             with PILImage.open(visual_path) as pi:
-                                 DPI = 300.0
-                                 px_per_mm = DPI / 25.4
-                                 calc_w_mm = pi.width / px_per_mm
-                                 _log(f"🔎 Recalculated width from provided stamp: {calc_w_mm:.2f}mm")
-                                 block_width_mm = calc_w_mm
-                     except Exception as e:
-                         _log(f"⚠️ Failed to recalculate width from provided stamp: {e}")
-
-                # Check for Simplified Mode (Background Pages in Multi-Sig)
-                # If we are generating the overlay for background pages, we want a small logo + date
-                target_width_mm = block_width_mm
-                if multi_sig_mode:
-                     # For background pages, we might want a slightly smaller or different width
-                     # But 1.5mm was definitely a bug. Let's use logo_width_mm or a safe minimum.
-                     if logo_width_mm < 10:
-                         logo_width_mm = 20.0
-                     # If we are in the overlay loop/logic, use logo_width_mm?
-                     # Actually, this block calculates `final_w_mm` below.
-                     pass
-
-                _log(f"🔎 DEBUG block_width_mm: {block_width_mm}, logo_width_mm: {logo_width_mm}")
-
-                logo_margin_mm = float(sig_conf.get('margin_mm', DEFAULT_SIGNATURE_SETTINGS['margin_mm']))
-                placement = sig_conf.get('placement', DEFAULT_SIGNATURE_SETTINGS['placement'])
-
-                # Compute placement using separate X/Y margins (merge fallback uses mm).
-                # Vertical margin is interpreted as distance from the nearest vertical edge
-                try:
-                    sig_conf_local = sig_conf or {}
-                    margin_x_val = float(sig_conf_local.get('margin_x_mm', DEFAULT_SIGNATURE_SETTINGS['margin_mm']))
-                    margin_y_val = float(sig_conf_local.get('margin_y_mm', DEFAULT_SIGNATURE_SETTINGS['margin_mm']))
-                    # Use the margins directly for output placement.
-                    margin_y_for_output = margin_y_val
-
-                    # Estimate total block height (logo + text) for accurate placement
-                    # If we have the image, use its ratio
-                    total_sig_height_mm = 20.0 # Default fallback
-                    if is_provided_stamp:
-                         try:
-                             with PILImage.open(Path(args.visual_stamp_path)) as pi:
-                                 ratio = pi.height / pi.width
-                                 total_sig_height_mm = block_width_mm * ratio
-                         except:
-                                 pass
-                    try:
-                        from PIL import Image as PILImage, ImageOps
-                        with PILImage.open(str(logo_imza_path)) as img_for_dims:
-                            # Handle EXIF orientation
-                            img_for_dims = ImageOps.exif_transpose(img_for_dims)
-                            # Calculate logo height in mm
-                            actual_logo_h_mm = (img_for_dims.height / img_for_dims.width) * logo_width_mm
-                            
-                        # Estimate text height using the same heuristic as the GUI preview
-                        assumed_lines = 3
-                        estimated_text_h_mm = ((assumed_lines * 175) + 110) / 1000.0 * block_width_mm
-                        total_sig_height_mm = actual_logo_h_mm + estimated_text_h_mm
-                    except Exception:
-                        pass
-                    logo_imza_height_mm = total_sig_height_mm
-                    
-                    # --- ROTATION AWARE PLACEMENT CALCULATION ---
-                    
-                    # 1. Determine "Visual" (User View) Page Dimensions
-                    if rotate in (90, 270):
-                        view_w = page_h_mm
-                        view_h = page_w_mm
-                    else:
-                        view_w = page_w_mm
-                        view_h = page_h_mm
-                        
-                    # 2. Calculate coordinates in VISUAL space (Origin Top-Left)
-                    # Coordinates represent top-left of the signature block
-                    if placement == 'top-right':
-                        vis_x = view_w - margin_x_val - block_width_mm
-                        vis_y = margin_y_for_output
-                    elif placement == 'top-left':
-                        vis_x = margin_x_val
-                        vis_y = margin_y_for_output
-                    elif placement == 'bottom-right':
-                        vis_x = view_w - margin_x_val - block_width_mm
-                        vis_y = view_h - margin_y_for_output - logo_imza_height_mm
-                    elif placement == 'bottom-left':
-                        vis_x = margin_x_val
-                        vis_y = view_h - margin_y_for_output - logo_imza_height_mm
-                    elif placement == 'center':
-                        vis_x = (view_w - block_width_mm) / 2.0 + margin_x_val
-                        vis_y = (view_h - logo_imza_height_mm) / 2.0 + margin_y_for_output
-                    else:
-                        vis_x = max(4.0, view_w - margin_x_val - block_width_mm)
-                        vis_y = margin_y_for_output
-                        
-                    # 3. Map Visual Coordinates to Physical FPDF Page Coordinates
-                    # Center of signature block in Visual Space
-                    cx = vis_x + block_width_mm / 2.0
-                    cy = vis_y + logo_imza_height_mm / 2.0
-                    
-                    img_rot = 0
-                    
-                    if rotate == 0:
-                        # R=0: Visual TL = Phys TL.
-                        phys_cx = cx
-                        phys_cy = cy
-                        img_rot = 0
-                    elif rotate == 90:
-                        # R=90 (CW): Visual Top-Left is Physical Bottom-Left.
-                        # Mapping: Phys X = Vis Y. Phys Y = page_height - cx (Wait, checked this before)
-                        # No, previous detailed analysis for R=90:
-                        # Phys BL (0,0) -> Vis TL.
-                        # Phys TL (0,H) -> Vis TR.
-                        # Vis TL (0,0) -> Phys BL (0,0).
-                        # Let's re-verify my update in apply_logo_xobject.
-                        # apply_logo_xobject R=90: pcx = cy, pcy = page_height - cx.
-                        # Is that correct?
-                        # Vis (x=0, y=0) -> Phys (0, H). (Vis TL -> Phys TL R=90? No).
-                        # R=90 CW. Phys BL -> Vis TL.
-                        # So Vis (0,0) -> Phys (0,0).
-                        # So for Vis x=0, y=0 -> Phys x=0, y=0.
-                        # My formula: cx, cy.
-                        # If cx=0, cy=0 -> pcx=0, pcy=H. This is Phys (0, H) [TL]. WRONG.
-                        # Wait.
-                        # Paper BL (0,0). Rot 90 CW. BL Corner moves to TL Corner.
-                        # So Visual TL corresponds to Physical BL.
-                        # So Vis(0,0) -> Phys(0,0).
-                        # So pcx = cy? (Vis Y maps to Phys X?).
-                        # Vis Y (Down). Phys X (Right).
-                        # Vis Y increases -> Phys X increases. Yes.
-                        # Vis X (Right). Phys Y (Up).
-                        # Vis X increases -> Phys Y decreases?
-                        # Vis TL (Phys BL) -> Vis TR (Phys TL).
-                        # Phys BL(0,0) -> Phys TL(0,H).
-                        # Phys Y increases.
-                        # So Vis X increases -> Phys Y increases.
-                        # So pcx = cy. pcy = cx.
-                        
-                        # Apply this corrected logic to both functions.
-                        # Previous apply_logo_xobject logic:
-                        # pcx = cy. pcy = page_height - cx.
-                        # This says Phys Y decreases as Vis X increases.
-                        # This implies Vis TR is Phys BR (not TL).
-                        # Vis TR (Right-Top). Rot 90 CW means Top-Right of view comes from Top-Left of physical?
-                        # Phys TL (0,H) -> Rot 90 CW -> Vis TR. Correct.
-                        # So Vis TR IS Phys TL.
-                        # Vis TL IS Phys BL.
-                        # So Vis X (Left->Right) goes Vis TL -> Vis TR.
-                        # Phys BL(0,0) -> Phys TL(0,H).
-                        # So Phys Y increases.
-                        # So pcy should be proportional to cx.
-                        # pcy = cx.
-                        
-                        # So my previous logic in apply_logo_xobject (pcy = page_height - cx) was probably WRONG?
-                        # Or did I confuse coords?
-                        # Let's stick to the simplest one:
-                        # Rot 90 CW.
-                        # Vis X maps to Phys Y.
-                        # Vis Y maps to Phys X.
-                        # Vis Origin (0,0 TL) maps to Phys Origin (0,0 BL).
-                        # WAIT. Phys Origin (0,0) is BL in PDF.
-                        # Rot 90 CW places Phys BL at top-left.
-                        # So Vis TL IS Phys BL.
-                        # So origin matches origin.
-                        # So pcy = cx. pcx = cy.
-                        # WHY did I think otherwise?
-                        # Because in FPDF/Overlay context...
-                        # In apply_logo_xobject, we place on PHYSICAL page.
-                        # So we need Physical Coords.
-                        # So `pcx = cy`, `pcy = cx`.
-                        
-                        # Let's fix apply_logo_xobject logic if I broke it.
-                        # But here in sign_cmd, we are creating FPDF overlay.
-                        # FPDF overlay is standard PDF (Rot=0).
-                        # Then we MERGE it.
-                        # Merging aligns Phys BL to Phys BL.
-                        # So we need to place the image at the Physical coordinates on the Overlay PDF.
-                        # FPDF uses Top-Left origin.
-                        # FPDF (x,y) -> PDF (x, H-y).
-                        # We want FPDF (x,y) to result in Physical (pcx, pcy).
-                        # So PDF x = pcx, PDF y = pcy.
-                        # FPDF x = pcx.
-                        # FPDF y = H - pcy. Or `pcy = H - FPDF_y`.
-                        # So `logo_imza_x_mm = pcx`.
-                        # `logo_imza_y_mm = page_h_mm - pcy - final_h`. (Since FPDF places top-left of image).
-                        
-                        # So first, get correct PCX, PCY (Center of image in Phys Space).
-                        # Rot 90: pcx = cy, pcy = cx.
-                        phys_cx = cy
-                        phys_cy = cx
-                        img_rot = -90
-                        
-                        # Wait, what if I was right before?
-                        # Phys BL(0,0) -> Vis TL.
-                        # Vis X increases (Right). -> Vis TR.
-                        # Phys: Moving along Left Edge (Bottom->Top).
-                        # So Phys Y increases.
-                        # So `pcy` increases with `cx`. `pcy = cx`. Correct.
-                        # Vis Y increases (Down). -> Vis BL.
-                        # Phys: Moving along Bottom Edge (Left->Right).
-                        # So Phys X increases.
-                        # So `pcx` increases with `cy`. `pcx = cy`. Correct.
-                        
-                        # So Correct Mapping for R=90 is:
-                        # pcx = cy
-                        # pcy = cx
-
-                    elif rotate == 180:
-                        # R=180: Vis TL is Phys TR (W, H).
-                        phys_cx = page_w_mm - cx
-                        phys_cy = page_h_mm - cy
-                        img_rot = 180
-                    elif rotate == 270:
-                        # R=270 (-90): Vis TL is Phys BR (W, 0).
-                        # Vis X (Right) -> Phys TR (W,H). (Phys Y increases).
-                        # Phys BR(0,0 relative to rotated?) No.
-                        # Phys BR (W,0) -> Vis TL.
-                        # Vis TR (Phys BR) -> Vis TR. Wait.
-                        # Phys BR (W,0). Rot 90 CCW.
-                        # BR moves to TR.
-                        # So Vis TR is Phys BR.
-                        # Vis TL is Phys TR (W,H).
-                        # So Vis Origin (0,0) is Phys (W, H).
-                        # Vis X increases (Right) -> Vis TR (Phys BR).
-                        # Phys TR(W,H) -> Phys BR(W,0).
-                        # Phys Y decreases.
-                        # So pcy = H - cx.
-                        # Vis Y increases (Down) -> Vis BL (Phys TL).
-                        # Phys TR(W,H) -> Phys TL(0,H).
-                        # Phys X decreases.
-                        # So pcx = W - cy.
-                        
-                        phys_cx = page_w_mm - cy
-                        phys_cy = page_h_mm - cx
-                        img_rot = 90
-                    else:
-                        phys_cx = cx
-                        phys_cy = cy
-                        img_rot = 0
-
-                    # Calculate final top-left for FPDF placement
-                    # The dimensions of the rotated image:
-                    if rotate in (90, 270):
-                        final_w_mm = logo_imza_height_mm
-                        final_h_mm = block_width_mm
-                    else:
-                        final_w_mm = block_width_mm
-                        final_h_mm = logo_imza_height_mm
-                        
-                    # FPDF coords:
-                    # x = phys_cx - w/2
-                    # y = page_height - (phys_cy + h/2)  <-- Mapping Phys Y (Up) to FPDF Y (Down)
-                    # Because FPDF (0,0) is TL. Phys (0,H) is TL.
-                    # Phys Y = H -> FPDF Y = 0.
-                    # Phys Y = 0 -> FPDF Y = H.
-                    # So FPDF Y = H - Phys Y.
-                    # We want center alignment?
-                    # FPDF image takes x,y (top-left).
-                    # Center of image in FPDF coords:
-                    # cx_fpdf = phys_cx
-                    # cy_fpdf = page_h_mm - phys_cy
-                    # x_fpdf = cx_fpdf - final_w/2
-                    # y_fpdf = cy_fpdf - final_h/2
-                    
-                    logo_imza_x_mm = phys_cx - final_w_mm / 2.0
-                    logo_imza_y_mm = (page_h_mm - phys_cy) - final_h_mm / 2.0
-
-                except Exception:
-                    # Fallback if calculation fails
-                    logo_imza_x_mm = min(188, page_w_mm - block_width_mm)
-                    logo_imza_y_mm = min(210, page_h_mm - 4)
-                    final_w_mm = block_width_mm
-
-                try:
-                    # show localized placement label in logs when possible
-                    pl_label = next((lbl for code, lbl in PLACEMENT_OPTIONS if code == placement), placement)
-                    _log(f'Overlay page size: {page_w_mm:.2f}x{page_h_mm:.2f} mm; placing signature at x={logo_imza_x_mm:.2f} y={logo_imza_y_mm:.2f} (w={final_w_mm}mm) yerleşim={pl_label} yandan={margin_x_val}mm dikey={margin_y_val}mm rot={rotate}')
-                except Exception:
-                    pass
-                try:
-                    # Build signer info lines
-                    signer_lines = ["İmzalayan:"]
-                    signer_name = None
-                    cert_serial = None
-                    cert_fp_short = None
-                    cert_fp_full = None
-                    try:
-                        for cert in session.get_objects({Attribute.CLASS: ObjectClass.CERTIFICATE}):
-                            try:
-                                lbl = cert[Attribute.LABEL]
-                            except Exception:
-                                lbl = None
-                            if lbl and cert_label and lbl == cert_label:
-                                try:
-                                    cert_der = cert[Attribute.VALUE]
-                                    cert_obj = x509.load_der_x509_certificate(cert_der, default_backend())
-                                    try:
-                                        from cryptography.x509.oid import NameOID
-                                        cn_attrs = cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
-                                        if cn_attrs:
-                                            signer_name = cn_attrs[0].value
-                                    except Exception:
-                                        signer_name = None
-                                    try:
-                                        cert_serial = cert_obj.serial_number
-                                    except Exception:
-                                        cert_serial = None
-
-                                    # SHA-256 fingerprint (full hex and short form for image)
-                                    try:
-                                        fp = cert_obj.fingerprint(hashes.SHA256()).hex().upper()
-                                        cert_fp_full = fp
-                                        cert_fp_short = fp[:32]
-                                    except Exception:
-                                        cert_fp_full = None
-                                        cert_fp_short = None
-
-                                    # Log detailed certificate info to GUI log for review
-                                    try:
-                                        issuer = cert_obj.issuer.rfc4514_string()
-                                    except Exception:
-                                        issuer = None
-                                    try:
-                                        # Use UTC-aware properties if available to avoid deprecation warnings
-                                        nb = getattr(cert_obj, 'not_valid_before_utc', None) or getattr(cert_obj, 'not_valid_before', None)
-                                        na = getattr(cert_obj, 'not_valid_after_utc', None) or getattr(cert_obj, 'not_valid_after', None)
-                                        not_before = nb.date() if nb is not None else None
-                                        not_after = na.date() if na is not None else None
-                                    except Exception:
-                                        not_before = None
-                                        not_after = None
-                                    try:
-                                        sig_alg = cert_obj.signature_algorithm_oid._name
-                                    except Exception:
-                                        sig_alg = getattr(cert_obj.signature_algorithm_oid, 'dotted_string', str(cert_obj.signature_algorithm_oid))
-                                    try:
-                                        pub = cert_obj.public_key()
-                                        key_type = pub.__class__.__name__
-                                    except Exception:
-                                        key_type = None
-                                    try:
-                                        fprint = cert_fp_full
-                                    except Exception:
-                                        fprint = None
-
-                                except Exception:
-                                    pass
-                                break
-                    except Exception:
-                        pass
-
-                    if not signer_name:
-                        try:
-                            # If called from GUI, gui_logger may be a bound method whose __self__ is the GUIApp
-                            owner = getattr(gui_logger, '__self__', None)
-                            if owner and getattr(owner, 'cert_info_var', None) and owner.cert_info_var.get():
-                                signer_name = owner.cert_info_var.get().split('|')[-1].strip()
-                            elif cert_label:
-                                signer_name = cert_label
-                            else:
-                                signer_name = 'İmzacı'
-                        except Exception:
-                            signer_name = 'İmzacı'
-
-                    try:
-                        token_id = f"Slot {slot.slot_id}"
-                        token_label = (token.label or '').strip()
-                        if token_label:
-                            token_id += f" ({token_label})"
-                        token_serial = token.serial_number or None
-                    except Exception:
-                        token_id = None
-                        token_serial = None
-
-                    try:
-                        from datetime import datetime
-                        ts = datetime.now().astimezone()
-                        # Date only, format dd.mm.yyyy
-                        ts_text = ts.strftime('%d.%m.%Y')
-                    except Exception:
-                        ts_text = ''
-                    # Put name on a separate line
-                    if signer_name:
-                        signer_lines.append(signer_name)
-                    if ts_text:
-                        signer_lines.append(f'Tarih: {ts_text}')
-
-                    if cert_serial:
-                        signer_lines.append(f'SN: {cert_serial}')
-
-
-                except Exception:
-                    signer_lines = []
-
-                # Compose combined image (logo + text) so it survives XObject copy
-                try:
-                    logo_imza_for_pdf = logo_imza_path
-                    combined_created = False
-                    
-                    # Use simplified mode if Multi-Sig is ON (and we are in the Unsigned flow)
-                    use_simplified = multi_sig_mode and not is_signed_already
-
-                    # Check if we should use the provided preview stamp directly
-                    # In Single-Sig mode: overlay uses gui_preview_sig.png (GUI preview) for background pages (1+)
-                    # In Multi-Sig mode: overlay uses logo_imza_with_text.png (date only) for background pages (1+),
-                    #                     while Page 0 gets gui_preview_sig.png placed by pyHanko via StaticStampStyle
-                    use_provided_stamp_local = False
-                    if hasattr(args, 'visual_stamp_path') and args.visual_stamp_path:
-                         if Path(args.visual_stamp_path).exists():
-                             use_provided_stamp_local = True
-
-                    # In Single-Sig mode (use_simplified=False), use GUI preview for background pages overlay
-                    if use_provided_stamp_local and not use_simplified:
-                        logo_imza_for_pdf = Path(args.visual_stamp_path)
-                         # block_width_mm is already set correctly? 
-                         # Actually, when using provided stamp, we computed `final_block_w_mm` earlier (around line 1340).
-                         # But here `block_width_mm` might be the config value.
-                         # Let's trust the provided stamp's logic if possible, or re-calculate width from image.
-                         # For overlay purposes, we need strict control.
-                        combined_created = True # Treat as created so we don't try to rotate/transpose blindly if unnecessary
-                         # Ensure we use the width calculated earlier from the image if available
-                        if 'final_block_w_mm' in locals():
-                              block_width_mm = final_block_w_mm
-                        else:
-                             # Re-calculate if not in locals (variables might be cleared or scope differs)
-                             try:
-                                 with PILImage.open(logo_imza_for_pdf) as pi:
-                                    DPI = 300.0
-                                    px_per_mm = DPI / 25.4
-                                    block_width_mm = pi.width / px_per_mm
-                                    final_w_mm = block_width_mm # Ensure final_w_mm is also synced
-                             except:
-                                 pass
-                    
-                    elif signer_lines:
-                        combined_path = TEMP_DIR / f'logo_imza_with_text.png'
-                        # Respect configured font family/style when creating combined image
-                        font_family_cfg = sig_conf.get('font_family') if sig_conf else None
-                        font_style_cfg = sig_conf.get('font_style', 'Normal') if sig_conf else 'Normal'
-                        
-                        _signer_lines_for_img = list(signer_lines)
-                        if use_simplified:
-                            _log(f"🎯 Creating SIMPLIFIED stamp for multi-sig background pages (date only)")
-                            # Multi-Sig background pages (2+): Simplified stamp with date only
-                            # User Request: "logo_imza_with_text.png must be exactly like gui_preview, only diff is text is Date only"
-                            # Filter lines to keep only 'Tarih:' line
-                            date_line = next((l for l in _signer_lines_for_img if l.startswith('Tarih:')), None)
-                            if date_line:
-                                _signer_lines_for_img = [date_line]
-                            else:
-                                _signer_lines_for_img = [] # Just logo if no date found
-                        else:
-                            _log(f"🎯 Creating FULL stamp for overlay (all signer lines)")
-
-                        result_img, actual_w_mm = create_combined_signature_image(
-                            logo_imza_path=logo_imza_path,
-                            signer_lines=_signer_lines_for_img,
-                            font_size_mm=4.5, # FIXED: Was mistakenly using block_width_mm (40.0) which made text huge
-                            logo_width_mm=logo_width_mm,
-                            output_path=combined_path,
-                            font_family=font_family_cfg,
-                            font_style=font_style_cfg,
-                            simplified_mode=False # False because we want "Same visual style" just different text content. passing True might trigger other logic.
-                        )
-                        if result_img:
-                            # Use the generated combined image directly for embedding in the overlay PDF.
-                            logo_imza_for_pdf = combined_path
-                            block_width_mm = actual_w_mm # Use the calculated total width for PDF placement
-                            combined_created = True
-                        else:
-                            logo_imza_for_pdf = logo_imza_path
-                            combined_created = False
-                    else:
-                        logo_imza_for_pdf = logo_imza_path
-                except Exception as e:
-                    try:
-                        _log(f'Error creating combined signature image: {e}')
-                    except Exception:
-                        pass
-                    logo_imza_for_pdf = logo_imza_path
-
-                # If we could not create a combined image but signer_lines exist, disable XObject optimization so text is preserved via PDF text fallback
-                try:
-                    if signer_lines and logo_imza_for_pdf == logo_imza_path:
-                        _log('Combined image creation failed; disabling XObject optimization to preserve signer text')
-                        use_xobject_flag = False
-                except Exception:
-                    pass
-
-                # place signature image first
-                try:
-                    # ROTATION HANDLING: Rotate the image file if necessary
-                    final_img_path = logo_imza_for_pdf
-                    if rotate != 0:
-                        try:
-                            # Load, rotate, save to temp
-                            with PILImage.open(str(logo_imza_for_pdf)) as im:
-                                # Apply EXIF transpose first if not already done in create_combined
-                                if not combined_created:
-                                    im = ImageOps.exif_transpose(im)
-                                    
-                                # Rotate using negative angle because PIL rotates CCW, but we calculated necessary CW rotation correction (Wait, verify again)
-                                # img_rot=90 means we want 90 degrees correction.
-                                # If calculating mapping to visual space, we found img_rot.
-                                # Let's stick with rotate(-img_rot) as derived in thought process.
-                                # -(-90) = 90 (CCW) => correct for 90 CW page.
-                                rot_img = im.rotate(-img_rot, expand=True, resample=PILImage.BICUBIC)
-                                rotated_path = TEMP_DIR / f"rot_{rotate}_{logo_imza_for_pdf.name}"
-                                rot_img.save(rotated_path)
-                                final_img_path = rotated_path
-                        except Exception as e:
-                            _log(f"Image rotation failed: {e}")
-                            final_img_path = logo_imza_for_pdf
-
-                    pdf.image(str(final_img_path), x=logo_imza_x_mm, y=logo_imza_y_mm, w=final_w_mm)
-                except Exception:
-                    try:
-                        pdf.image(str(logo_imza_path), x=logo_imza_x_mm, y=logo_imza_y_mm, w=block_width_mm)
-                    except Exception:
-                        pass
-
-            pdf.output(str(temp_overlay))
-            
-            # Try XObject-based optimization first if requested
-            temp_with_logo = TEMP_DIR / 'temp_with_logo.pdf'
-            temp_with_logo.parent.mkdir(parents=True, exist_ok=True)
-            used_xobject = False
-            # honor CLI flag if present, otherwise default to the `use_xobject_opt` parameter (now True by default)
-            use_xobject_flag = getattr(args, 'use_xobject_opt', use_xobject_opt)
-            
-            # FORCE DISABLE XObject optimization for Multi-Sig mode
-            # This forces the fallback mechanism (PyPDF2/pypdf) where we can easily control per-page merging
-            # to skip the first page.
-            if multi_sig_mode:
-                use_xobject_flag = False
-                
-            if use_xobject_flag:
-                try:
-                    try:
-                        # Convert X/Y margins from mm -> pt for pikepdf placement
-                        try:
-                            margin_x_pt = (margin_x_val / 25.4) * 72.0
-                            margin_y_pt = (margin_y_for_output / 25.4) * 72.0
-                        except Exception:
-                            margin_x_pt = margin_y_pt = 20.0
-                    except Exception:
-                        margin_x_pt = margin_y_pt = 20.0
-                    try:
-                        # Skip first page if Legacy Mode (Unsigned)
-                        skip_first = (add_logo_all_pages and not multi_sig_mode)
-                        
-                        success = apply_logo_xobject(
-                            args.in_path, 
-                            temp_overlay, 
-                            temp_with_logo, 
-                            add_to_all_pages=add_logo_all_pages, 
-                            size_scale=0.8, 
-                            placement=placement, 
-                            margin_x=margin_x_pt, 
-                            margin_y=margin_y_pt, 
-                            target_width_mm=block_width_mm,
-                            skip_first_page=skip_first
-                        )
-                        if success:
-                            used_xobject = True
-                            # CRITICAL: Update in_path to use the file with logo
-                            args.in_path = temp_with_logo
-                        else:
-                            _log('XObject optimizasyonu uygulanamadı, fallback ile devam ediliyor')
-                    except Exception as e:
-                        _log(f'XObject optimizasyonunda hata, fallback ile devam ediliyor: {e}')
-                except Exception as e:
-                    _log(f'XObject optimizasyonunda hata, fallback ile devam ediliyor: {e}')
-
-            if not used_xobject:
-                try:
-                    # PyPDF2 ile merge - hızlı merge, compression yok (büyük olsa da hızlı)
-                    with open(args.in_path, 'rb') as inf:
-                        reader = PdfReader(inf, strict=False)
-                        with open(temp_overlay, 'rb') as overlay_f:
-                            overlay_reader = PdfReader(overlay_f, strict=False)
-                            overlay_page = overlay_reader.pages[0]
-                            
-                            writer = PdfWriter()
-                            
-                            # Logo ekleme stratejisi
-                            _log(f"MERGE START: multi_sig_mode={multi_sig_mode}, add_logo_all_pages={add_logo_all_pages}, is_signed={is_signed_already}")
-                            
-                            if multi_sig_mode:
-                                _log(f"✅ MERGE MODE: Multi-Sig Path")
-                                # Multi-Sig Mode:
-                                # Page 0 (First Page): KEEP CLEAN (No overlay). pyHanko will sign it visibly.
-                                # Page 1..N: MERGE OVERLAY (Simplified Stamp).
-                                
-                                # Add First Page (Clean)
-                                writer.add_page(reader.pages[0])
-                                
-                                # Add subsequent pages (Merged)
-                                for page_num in range(1, len(reader.pages)):
-                                    page = reader.pages[page_num]
-                                    page.merge_page(overlay_page) # Apply simplified stamp
-                                    writer.add_page(page)
-                                    
-                            elif add_logo_all_pages:
-                                _log(f"✅ MERGE MODE: Single-Sig/Legacy Path")
-                                # Legacy Mode (Single Signature / First Signer):
-                                # Page 0: KEEP CLEAN (No overlay). pyHanko will add the full visual signature here.
-                                # Page 1..N: MERGE OVERLAY (Full Stamp/Logo) so it appears on all pages.
-                                
-                                # This fixes the issue where Page 0 had an overlay but no real signature field visible,
-                                # or the overlay conflicted with the signer's appearance.
-                                
-                                # Add First Page (Clean)
-                                writer.add_page(reader.pages[0])
-
-                                # Merge overlay to subsequent pages
-                                for page_num in range(1, len(reader.pages)):
-                                    page = reader.pages[page_num]
-                                    page.merge_page(overlay_page)
-                                    writer.add_page(page)
-                            else:
-                                # Sadece ilk sayfaya ekle (Legacy Option - usually not used if we want visible signature)
-                                # If this option is active, it implies we ONLY want the logo on page 0?
-                                # But if we are signing, we always want the signer to handle the visual.
-                                # So this block might be redundant or conflicting.
-                                # Let's keep it clean for Page 0 too, and assume signer handles it.
-                                # But if "add_logo_all_pages" is False, maybe we do nothing?
-                                # Actually, if add_logo_all_pages is False, we just copy everything clean.
-                                
-                                for page_num in range(len(reader.pages)):
-                                    writer.add_page(reader.pages[page_num])
-                            
-                            temp_with_logo = TEMP_DIR / 'temp_with_logo.pdf'
-                            temp_with_logo.parent.mkdir(parents=True, exist_ok=True)
-                            writer.write(temp_with_logo)
-                            
-                            # Sanitize with pikepdf if available to fix XRef structure (prevent Hybrid XRef errors)
-                            if pikepdf:
-                                try:
-                                    temp_sanitized = TEMP_DIR / 'temp_sanitized.pdf'
-                                    with pikepdf.open(temp_with_logo) as _pdf:
-                                        _pdf.save(temp_sanitized)
-                                    temp_with_logo = temp_sanitized
-                                except Exception as e:
-                                    _log(f"⚠️ pikepdf sanitization failed: {e}")
-                            # Use the new merged PDF as input for signing
-                            # CRITICAL: We update args.in_path locally so the signer uses the overlay version
-                            # but we must be careful not to overwrite the original file on disk yet.
-                            args.in_path = temp_with_logo
-                            if gui_logger:
-                               pass
-                except Exception as e:
-                    pass
-        
-        # 4. Sign logic using PSS
-        # Note: If is_signed_already is True, we skipped the overlay part above
-        # AND we must use incremental signing.
-        # pyHanko Signer handles incremental if we tell it?
-        # Actually PdfSigner writes to out_path.
-        
-        # Existing logic:
-        # with open(args.in_path, 'rb') as inf:
-        #    w = IncrementalPdfFileWriter(inf) if incremental else ...
-        
-        # We need to adjust the signing call below.
-        
-        try:
-             # Decide on incremental writer vs fresh writer
-             # If strict incremental (is_signed_already), use IncrementalPdfFileWriter
-             # If overlay flow (not signed), we usually create a fresh PDF (unless we use incremental on the overlay temp).
-             # Providing 'strict' incremental means using the original file stream.
-             
-             # args.in_path now points to either:
-             # 1. Original file (if is_signed_already)
-             # 2. Compressed temp file (if compressed and not signed)
-             # 3. Merged overlay temp file (if overlay and not signed)
-             
-            with open(args.in_path, 'rb') as inf:
-                if is_signed_already:
-                    w = IncrementalPdfFileWriter(inf, strict=False)
-                else:
-                    if use_xobject_opt:
-                        # For clean PDF generation, usually non-incremental is fine if we reconstructed it
-                        w = IncrementalPdfFileWriter(inf, strict=False) 
-                    else:
-                         w = IncrementalPdfFileWriter(inf, strict=False)
-                
-                # ... existing signing call ...
-                
-                # Determine signature metadata (Visible Widget vs Invisible)
-                # If Multi-Sig OR Signed: We use 'visible_sig_settings' (Compounded Stamp) via 'sig_field_spec' usually passed to PdfSigner?
-                # Wait, PdfSigner takes 'existing_fields_only' etc.
-                # For NEW visible signature, we need `appearance_text_params` or `stamp_style`.
-                
-                # Correction: `pdf_signer.sign_pdf` takes `appearance_text_params` but that's for text.
-                # Use `PdfSignatureMetadata` passed to `sign_pdf`'s `signature_meta` arg? No.
-                # `sign_pdf` signature: (self, pdf_out: IncrementalPdfFileWriter, existing_fields_only=False, new_field_spec=None, ...)
-                
-                # Check how we did it for incremental (Signer 2):
-                # We used `signers.PdfSigner` constructor arguments? No.
-                # We passed `sig_field_spec` to `signers.PdfSigner`?
-                # Actually earlier in code: `pdf_signer = signers.PdfSigner(..., stamp_style=stamp_style)`
-                
-                # But here `pdf_signer` is already created.
-                # If we want to ADD a visible field for Signer 1 (Legacy/Clean Page 0), we need to pass `new_field_spec`.
-                
-                _new_field_spec = None
-                
-                # RE-CREATE Visible Signature Settings if missing (e.g. fresh PDF flow)
-                # We need this because 'field_spec' variable (which holds visible_sig_settings in incremental block)
-                # might not be available or applicable here if we didn't run the incremental block.
-                # However, we DO have the coordinates calculated in the overlay block (logo_imza_x_mm, etc.)
-                
-                # Function to helper create spec
-                def create_main_sig_field_spec():
-                    # Access outer scope variables (closure)
-                    # If variables don't exist, return None early
-                    try:
-                        _logo_x = logo_imza_x_mm
-                        _logo_y = logo_imza_y_mm
-                        _final_w = final_w_mm
-                        _final_h = final_h_mm
-                        _page_h = page_h_mm
-                    except NameError:
-                        _log("⚠️ Coordinates not available for visible sig spec")
-                        return None, None
-                    
-                    try:
-                        # Use the SAME calculation as apply_logo_xobject for consistency
-                        # This ensures Page 0 widget matches Page 1+ overlay positions
-                        
-                        pt_per_mm = 72.0 / 25.4
-                        
-                        # Get page dimensions in points
-                        ph_pts = _page_h * pt_per_mm
-                        pw_pts = page_w_mm * pt_per_mm if 'page_w_mm' in dir() else 595.0
-                        try:
-                            pw_pts = page_w_mm * pt_per_mm
-                        except NameError:
-                            pw_pts = 595.0
-                        
-                        # Image dimensions in points
-                        w_pt = _final_w * pt_per_mm
-                        h_pt = _final_h * pt_per_mm
-                        _log(f"📏 Calculated box: _final_w={_final_w:.2f}mm, _final_h={_final_h:.2f}mm => w_pt={w_pt:.1f}, h_pt={h_pt:.1f}")
-                        
-                        # Get margins in points (same as passed to apply_logo_xobject)
-                        try:
-                            mx = margin_x_pt if 'margin_x_pt' in dir() else margin_x_val * pt_per_mm
-                            my = margin_y_pt if 'margin_y_pt' in dir() else margin_y_for_output * pt_per_mm
-                        except NameError:
-                            mx = margin_x_val * pt_per_mm if 'margin_x_val' in dir() else 50.0
-                            my = margin_y_for_output * pt_per_mm if 'margin_y_for_output' in dir() else 50.0
-                        
-                        # Calculate VISUAL coordinates (same as apply_logo_xobject lines 626-643)
-                        # Using top-left origin as reference
-                        _placement = placement if 'placement' in dir() else 'top-right'
-                        try:
-                            _placement = placement
-                        except NameError:
-                            _placement = 'top-right'
-                        
-                        if _placement == 'top-right':
-                            vis_x = pw_pts - mx - w_pt
-                            vis_y = my
-                        elif _placement == 'top-left':
-                            vis_x = mx
-                            vis_y = my
-                        elif _placement == 'bottom-right':
-                            vis_x = pw_pts - mx - w_pt
-                            vis_y = ph_pts - my - h_pt
-                        elif _placement == 'bottom-left':
-                            vis_x = mx
-                            vis_y = ph_pts - my - h_pt
-                        elif _placement == 'center':
-                            vis_x = (pw_pts - w_pt) / 2.0 + mx
-                            vis_y = (ph_pts - h_pt) / 2.0 + my
-                        else:
-                            vis_x = pw_pts - mx - w_pt
-                            vis_y = my
-                        
-                        # Calculate center point (Visual coords, top-left origin)
-                        cx = vis_x + w_pt / 2.0
-                        cy = vis_y + h_pt / 2.0
-                        
-                        # Convert to Physical PDF coords (same as apply_logo_xobject line 650-653 for R=0)
-                        pcx = cx
-                        pcy = ph_pts - cy
-                        
-                        # Calculate final box coordinates (PDF bottom-left origin)
-                        x_pt = pcx - w_pt / 2.0
-                        y_pt = pcy - h_pt / 2.0
-                        
-                        # Get signature image path - use try/except for closure access
-                        try:
-                            img_p = logo_imza_for_pdf if logo_imza_for_pdf else None
-                        except NameError:
-                            img_p = None
-                        
-                        if not img_p and hasattr(args, 'visual_stamp_path') and args.visual_stamp_path:
-                            img_p = Path(args.visual_stamp_path)
-                        
-                        if img_p and Path(img_p).exists():
-                            from pyhanko.pdf_utils.images import PdfImage
-                            from pyhanko.stamp import StaticStampStyle
-                            from pyhanko.pdf_utils.layout import SimpleBoxLayoutRule, AxisAlignment, Margins
-                            
-                            # Read actual PNG dimensions to match box aspect ratio to image
-                            # This is the KEY FIX: box dimensions must match PNG aspect ratio
-                            # Otherwise STRETCH_TO_FIT leaves padding
-                            try:
-                                from PIL import Image as PILImage
-                                with PILImage.open(str(img_p)) as pil_img:
-                                    png_w, png_h = pil_img.size
-                                    png_aspect = png_h / png_w if png_w > 0 else 1.0
-                                    
-                                    # Calculate the TOP of the box BEFORE changing height
-                                    # This is where FPDF overlay places its top edge
-                                    original_box_top_pt = y_pt + h_pt
-                                    
-                                    # Recalculate h_pt based on PNG aspect ratio
-                                    h_pt = w_pt * png_aspect
-                                    
-                                    # Keep TOP edge fixed - adjust y_pt so top stays same
-                                    # y_pt + h_pt = original_box_top_pt
-                                    y_pt = original_box_top_pt - h_pt
-                                    
-                                    _log(f"📐 Box adjusted to PNG aspect: {png_w}x{png_h}px, aspect={png_aspect:.3f}, new h_pt={h_pt:.1f}")
-                            except Exception as pil_err:
-                                _log(f"⚠️ Could not read PNG dimensions, using calculated: {pil_err}")
-                            
-                            img_c = PdfImage(str(img_p))
-                            
-                            # Import InnerScaling to stretch image to fill the box
-                            from pyhanko.pdf_utils.layout import InnerScaling
-                            
-                            # Use STRETCH_TO_FIT - now box matches image aspect, so no padding
-                            style = StaticStampStyle(
-                                background=img_c, 
-                                border_width=0,
-                                background_layout=SimpleBoxLayoutRule(
-                                    x_align=AxisAlignment.ALIGN_MID, 
-                                    y_align=AxisAlignment.ALIGN_MID,
-                                    margins=Margins(0,0,0,0),
-                                    inner_content_scaling=InnerScaling.STRETCH_TO_FIT
-                                )
-                            )
-                            
-                            _log(f"📐 Widget coords: x={x_pt:.1f}, y={y_pt:.1f}, w={w_pt:.1f}, h={h_pt:.1f}")
-                            
-                            return SigFieldSpec(
-                                signature_field_name,
-                                box=(int(x_pt), int(y_pt), int(x_pt+w_pt), int(y_pt+h_pt)),
-                                on_page=0
-                            ), style
-                        else:
-                            _log(f"⚠️ Signature image not found: {img_p}")
-                            return None, None
-                    except Exception as e:
-                        _log(f"⚠️ Could not create visible sig spec: {e}")
-                        return None, None
-
-                # Generate it if needed
-                local_field_spec, local_stamp_style = None, None
-                
-                # CASE: Legacy Mode (Unsigned)
-                if add_logo_all_pages and not is_signed_already and not multi_sig_mode:
-                     local_field_spec, local_stamp_style = create_main_sig_field_spec()
-                     if local_field_spec:
-                         _new_field_spec = local_field_spec
-                         # And we MUST pass the stamp style to the signer too!
-                         signer_kwargs['stamp_style'] = local_stamp_style
-                         # Re-create signer with new kwargs if we modified them?
-                         # Actually PdfSigner is already created. We cannot easily inject stamp_style now.
-                         # We should create a NEW PdfSigner or modify the call.
-                         # PdfSigner.sign_pdf does NOT take stamp_style as argument.
-                         # It uses the one valid at creation.
-                         # So we should create PdfSigner LATER or RE-CREATE it.
-                         
-                         # RE-CREATE Signer with style
-                         # signer_kwargs was defined at line 1513. Let's update it and re-instantiate.
-                         signer_kwargs['stamp_style'] = local_stamp_style
-                         signer_kwargs['new_field_spec'] = _new_field_spec
-                         pdf_signer = signers.PdfSigner(**signer_kwargs)
-                         
-                         _log("📌 Legacy Mode: Applying Visible Signature Widget to Page 0")
-
-                # CASE: Multi-Sig (Unsigned)
-                if multi_sig_mode and not is_signed_already:
-                     local_field_spec, local_stamp_style = create_main_sig_field_spec()
-                     if local_field_spec:
-                         _new_field_spec = local_field_spec
-                         signer_kwargs['stamp_style'] = local_stamp_style
-                         signer_kwargs['new_field_spec'] = _new_field_spec
-                         pdf_signer = signers.PdfSigner(**signer_kwargs)
-                         _log("📌 Multi-Sig Mode: Applying Visible Signature Widget to Page 0")
-                
-                # CASE: Incremental (Signed) - field_spec likely already exists from incremental block
-                if is_signed_already and 'field_spec' in locals() and field_spec:
-                     _new_field_spec = field_spec
-                     _log("📌 Incremental Mode: Applying Visible Signature Widget")
-
-
-                with open(args.out_path, 'wb') as outf:
-                    pdf_signer.sign_pdf(
-                        w, output=outf,
-                        existing_fields_only=False, # Allow creating new field
-                    )
-                    
-        except PermissionError as pe:
-             # User-friendly message for locked file
-             raise PermissionError(f"Çıkış dosyası '{args.out_path}' başka bir program tarafından açık. Lütfen PDF görüntüleyiciyi kapatıp tekrar deneyin.") from pe
-        except Exception as e:
-             raise e
+    return True # Final fallback
+    
+def build_cli_parser():
              
     return True
         

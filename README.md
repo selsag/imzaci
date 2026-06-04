@@ -22,6 +22,7 @@ Veya aşağıda Python ile kurulum yap.
 ### 🆕 Gelişmiş Özellikler (v2.4)
 
 - **🔗 Çoklu İmzalama** - Birden fazla kişi aynı belgeyi ardı ardına imzalayabilir
+- **🧷 Gelişmiş Logo Yerleşimi** - PDF rotasyonunu göz önünde bulundurarak imza logosunu doğru konuma kaydırma ve hizalama
 - **⏰ Zaman Damgası (TSA)** - İmza zamanını resmi olarak kayıt altına al
 - **📦 Süresi Uzatma (LTV)** - Sertifika zincirini PDF'e gömülerek yıllar sonra doğrulama
 - **🔒 Belge Kısıtlamaları (DocMDP)** - 3 seviye izin kontrolü (İmza-sadece, Form+İmza, Form+Yorum+İmza)
@@ -88,6 +89,10 @@ Her bir kişi:
 3. İmzala → Yeni imza eklenir (belgem_signed_2.pdf)
 ```
 
+- Sayfa 0: İlk imza görünür widget olarak yerleştirilir.
+- Sonraki imzalar: Temiz arka plan koruması ile yeni imzalar eklenir.
+- Dönüşlü PDF’lerde logo hizası artık otomatik olarak ayarlanır.
+
 #### Zaman Damgası (TSA) & Süresi Uzatma (LTV)
 ```
 "TSA" checkbox: İmza zamanını resmi sunucudan kaydettir
@@ -108,6 +113,7 @@ Her bir kişi:
 2. İmzalanacak PDF'lerin klasörünü seç
 3. Çıkış klasörünü seç (otomatik ayarlanır)
 4. PIN ve ayarlarla 100+ dosya otomatik imzala
+5. Logo/konum ayarları her PDF için ortak biçimde uygulanır; sayfa rotasyonu varsa da doğru hizalanır
 5. Hata varsa devam et, rapor döndür
 ```
 
